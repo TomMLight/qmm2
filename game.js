@@ -7,15 +7,9 @@
 
 //FUNCTION DECLARATIONS --------------------------------------------------------------------------------------------------------------------------
 
-// setRGB() - Draws to frame to screen.
-// Takes in a 2D array of integers: first dimension contains one entry for each pixel (only 1 dimension, all rows concatenated)
-// The 2nd dimension is an array of length 4, each value corresponding to an R, G, B, or A value for that pixel (actual order is ARGB I believe).
-// Aims to emulate Java's BufferdImage's setRGB method, including parameters that go unused to avoid confusion.
-// In the original, setRGB merely sets an image which is then (I believe) drawn when a repaint function is called later.
-// Here, to make my life easier, the drawing actually occurs in this function instead. This will change later.
+// Unpacks the RGBA data spat out by the hacked GameRender.update() and AmpColourMap.process() methods and repacks it as an ImageData object.
 function setRGB(startX, startY, width, height, rgbArray, offset, scansize) {
-  // First step is to convert 2D representation into 1D used by imageData by essentially concatenating all 2nd dimension arrays together.
-  const dataArray = new Uint8ClampedArray(width * height * 4); // Create an array of unsigned 8 bit values, with 4 valuess (R, G, B, and A) for each pixel.
+  const dataArray = new Uint8ClampedArray(width * height * 4); // Create an array of unsigned 8 bit values, with 4 values (R, G, B, and A) for each pixel.
   for(let i = 0; i < width * height; i++) { //Iterate over each value in the incoming array (1 for each pixel):
     //For each pixel, unpack each of the 4 values from the 2nd dimension of input array and put in one large array.
     dataArray[(i * 4) + 0] = rgbArray[i][0];
@@ -23,25 +17,37 @@ function setRGB(startX, startY, width, height, rgbArray, offset, scansize) {
     dataArray[(i * 4) + 2] = rgbArray[i][2];
     dataArray[(i * 4) + 3] = rgbArray[i][3];
   }
-  const imageData = new ImageData(dataArray, width); // Initialize a new ImageData object, using our new unpacked array as the data.
-  ctx.putImageData(imageData, startX, startY); // Draw image data to the canvas
+  return new ImageData(dataArray, width); // Create a new ImageData object using our unpacked array, and return it.
+}
+
+// Emulates the System.nanoTime() method from Java.
+function nanoTime() {
+  return performance.now() * 1_000_000 // Converting milliseconds to nanoseconds.
 }
 
 // Partial port of UpdateTask.run() from GameWindow.java in original, hacked to get requestAnimationFrame() to work.
-function run() {
-  const gfxframetime = 33000000; // "30 fps"
-  const quantum_frames_per_gfx_frame = gfxframetime / manager.quantumFrameTimeNanos();
-  let quantumframes_this_frame = 0;
+function graphicsLoop() {
   // In the original, there is a main loop that breaks when the goal is sounded, and calls a repaint when a certain amount of time has passed.
   // I have struggled greatly to directly port this to JavaScript due to requestAnimationFrame, which as far as I can tell is the only way to achieve runtime animation.
   // If this is not the case, I will fix this asap.
-  // Instead, this loop just executes until a certain number of quantum graphics frames have passed, when it exits and recursively calls requestAnimationFrame again. 
-  while(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
+  // Instead, this loop just executes until it is time to draw a new gfx frame, when it exits and recursively calls requestAnimationFrame again. 
+  let loop = true;
+  while(loop) {
     quantumframes_this_frame++;
-    manager.getQD().step();
+    if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
+      manager.getQD().step();
+    } else {
+      console.log("Should sleep!"); // This is never *ever* called in my tests, so I haven't actually implemented the sleeping yet!
+    }
+    const currenttime = nanoTime();
+    if(currenttime - lastframetime > gfxframetime) {
+      quantumframes_this_frame = 0;
+      lastframetime = currenttime;
+      manager.updateGraphics();
+      loop = false; // New graphics frame needed, exit the loop and request new frame.
+    }
   }
-  manager.updateGraphics();
-  requestAnimationFrame(run); // Recursively call requestAnimationFrame to queue next frame.
+  requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -74,7 +80,7 @@ class FloatArray2d {
   get(x, y) {return this.#data[x+this.#width*y];}
   set(x, y, v) {this.#data[x+this.#width*y]=v;}
   getWidth() {return this.#width;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
-  getData() {return this.#data;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class., unlike Java.
+  getData() {return this.#data;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
 }
 
 // Partial port of class from QuantumData.java in original
@@ -82,7 +88,7 @@ class BoolArray2d {
   #data; // final boolean[]
   #width; // int
   constructor(width, height) {
-    this.#data = new Array(width * height).fill(false); //In Java arrays are initialized with 0/False/Null
+    this.#data = new Array(width * height).fill(false); //In Java arrays are initialized with 0/False/Null, whereas they are left undefined in JavaScript. fill() fixes this.
     this.#width = width;
   }
   width() {return this.#width;}
@@ -126,8 +132,8 @@ class QuantumData {
   addGaussian(xc, yc, sigma, fx, fy, ascale) {
     const a = ascale * Math.pow(2*Math.PI*sigma*sigma,-0.25);
     const d = 4*sigma*sigma;
-    const omegax = 2*Math.PI*fx; // Original has comment saying this is incorrect, but Crispin has confirmed this is not the case.
-    const omegay = 2*Math.PI*fy; // Original has comment saying this is incorrect, but Crispin has confirmed this is not the case.
+    const omegax = 2*Math.PI*fx; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
+    const omegay = 2*Math.PI*fy; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
     for(let x=1;x<this.width-1;x++) {
       for(let y=1;y<this.width-1;y++) {
         const r2 = (x-xc)*(x-xc)+(y-yc)*(y-yc);
@@ -211,17 +217,29 @@ class QuantumData {
       this.#saveInitialState();
       this.#ensure_no_positive_potential();
     }
+    //Unsure where these logs went in your original code, just shoved haphazardly in here for now. Placement doesn't seem to affect values.
+    console.log("walls.get(x,y) " + this.#walls.get(100,100));
+    console.log("sink_mult.get(x,y) " + this.sink_mult.get(100,100));
+    console.log("real.get(x,y) " + this.#real.get(100,100));
     this.#controlstate.step();
     this.#reset_potential_cache();
     // "boundaries are never computed, hence left at 0"
     for(let y=1;y<this.height-1;y++) {
       for(let x=1;x<this.width-1;x++) {
-        if(!this.#walls.get(x,y)) {
-          this.#real.set(x,y,2)
+        if(!this.#walls.get(x,y)) { //Real component "fixed" at last!!!
+          this.#real.set(x,y,
+            this.sink_mult.get(x,y)*
+          (this.#real.get(x,y) - this.#delta_t * (-0.5 *
+            (this.#imag.get(x,y-1)+this.#imag.get(x,y+1)+this.#imag.get(x-1,y)+this.#imag.get(x+1,y)-4*this.#imag.get(x,y))
+          + this.#pot_cache.get(x,y)*this.#imag.get(x,y))));
         }
       }      
     }
-		// "I have inlined del2, it does make it faster"
+    console.log("delta_t " + this.#delta_t);
+    console.log("(imag.get(x,y-1)+imag.get(x,y+1)+imag.get(x-1,y)+imag.get(x+1,y)-4*imag.get(x,y)) " + (this.#imag.get(100,99)+this.#imag.get(100,101)+this.#imag.get(99,100)+this.#imag.get(101,100)-4*this.#imag.get(100,100)));
+    console.log("pot_cache.get(x,y) " + this.#pot_cache.get(100,100));
+    console.log("imag.get(x,y) " + this.#imag.get(100,100));
+    // "I have inlined del2, it does make it faster"
 		// "Inlining could happen automatically with vm options -XX:FreqInlineSize=50 -XX:MaxInlineSize=50"
 		// "But these are not universally supported or guaranteed not to change in future"
     for(let y=1;y<this.height-1;y++) {
@@ -235,6 +253,9 @@ class QuantumData {
         }
       }      
     }
+    console.log("after update, real.get(x,y) " + this.#real.get(100,100));
+    console.log("(real.get(x,y-1)+real.get(x,y+1)+real.get(x-1,y)+real.get(x+1,y)-4*real.get(x,y)) " + (this.#real.get(100,99)+this.#real.get(100,101)+this.#real.get(99,100)+this.#real.get(101,100)-4*this.#real.get(100,100)));
+    console.log("after update, imag.get(x,y) " + this.#imag.get(100,100));
   }
   #setupSinkMult() {
 		// "flood fill sink_mult with 0 where not a sink; otherwise distance in pixels from non-sink"
@@ -315,11 +336,13 @@ class GameRender {
   data; //int[]
   qd; // QuantumData
   colourmap; // AmpColourMap (for now)
+  #image; // ImageData
   width() {return Math.trunc(this.qd.width);}
   height() {return Math.trunc(this.qd.height);}
   constructor(source) {
     this.qd = source;
-    this.data = new Array(this.width()*this.height() * 4);
+    this.#image = new ImageData(new Uint8ClampedArray(this.width() * this.height() * 4), this.width()); //ImageData replaced BufferedImage
+    this.data = new Array(this.width()*this.height()); // To avoid bit-shifting back and forth data is a 2D array instead of a 1D array of RGBA values packed into a single int. May attempt bit shifting later to quadruple check this isn't causing issues.
     this.colourmap = new AmpColourMap();
   }
   update() {
@@ -328,13 +351,16 @@ class GameRender {
     // "rather than just calculate image.  but i profiled and it's faster."
     for (let y = 0; y < this.qd.height; y++) {
       for (let x = 0; x < this.qd.width; x++) {
-        const point = this.qd.get(x,y) // THIS DOES NOT MATCH, FIX???
+        const point = showpotential ? new Complex(0, 0) : this.qd.get(x,y) // No level potentials present at the moment, so imaginary component always 0.
         this.data[x + this.qd.width * y] = this.colourmap.process(point);
       }
     }
     
     this.colourmap.resetGain();
-    setRGB(0, 0, this.width(), this.height(), this.data, 0, this.width()); // In the original all this does is change the values of an image property which is drawn to the screen with a later repaint. Instead, this actually draws to the screen to make my life easier. Will fix later if this breaks things.
+    this.#image = setRGB(0, 0, this.width(), this.height(), this.data, 0, this.width()); // In the original this is a method that updates the RGB values of 'image'. As imageData cannot be edited once created in JavaScript, this instead returns an ImageData object which replaces the existing one.
+  }
+  getImage() {
+    return this.#image;
   }
 }
 
@@ -342,6 +368,7 @@ class GameRender {
 class LevelManger {
   qd; // QuantumData
   gr; // GameRender
+  controlstate; // ControlState
   #quantumframetimenanos; // long
   constructor() {
     this.controlstate = new ControlState();
@@ -361,7 +388,7 @@ class LevelManger {
   }
   updateGraphics() {
     this.gr.update();
-    //repaint should be called here but JavaScript's requestAnimationFrame is a pain so I draw to the screen at a different point instead. Will change if it breaks.
+    ctx.putImageData(this.gr.getImage(), 0, 0); // Draw data in gr.#image to canvas. Replaces lc.repaint in original.
   }
   quantumFrameTimeNanos() {
     return this.#quantumframetimenanos;
@@ -505,10 +532,20 @@ class ControlState {
 
 
 // MAIN METHOD -----------------------------------------------------------------------------------------------------------------------------------
+// Retrieving data from HTML.
 const canvas = document.getElementById("game"); // Grab canvas from HTML
 const ctx = canvas.getContext("2d"); // Create 2D context.
+
+// Setting up objects.
 const manager = new LevelManger(); // Create new LevelManager (top level object at the moment)
 
 manager.init(0.1, 2.5, 1.6/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. dt = 0.1, maxtilt = 2.5, thousanditertimesecs = 1.6/1.5 - all values taken from c-bounce.xml
-manager.addGaussianQUnits(200, 109, 20, 0, 0, 1); // Add a gaussian, values taken from c-bounce.xml and then tweaked.
-requestAnimationFrame(run); // Start recursive calling of requestAnimationFrame, using run() as the function.
+manager.addGaussianQUnits(200, 109, 20, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values taken from c-bounce.xml and then tweaked.
+
+// Begin implementation of UpdateTask.run()
+const gfxframetime = 33000000; // "30 fps"
+const quantum_frames_per_gfx_frame = gfxframetime / manager.quantumFrameTimeNanos();
+let lastframetime = nanoTime();
+let quantumframes_this_frame = 0;
+
+requestAnimationFrame(graphicsLoop); // Start recursive calling of requestAnimationFrame, using graphicsLoop() as the function.
