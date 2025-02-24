@@ -108,6 +108,8 @@ class QuantumData {
   width; height; // final int
   #controlstate; // ControlState
 
+  #gpu // To save calling the constructor every time QuantumData.step() is called, a new gpu property is added to the class for future reference.
+
   constructor(width, height, ks) {
     this.#controlstate = ks;
     this.width = width;
@@ -121,6 +123,7 @@ class QuantumData {
     this.sink_mult = new FloatArray2d(width, height);
     this.#levelDesignPotential = new FloatArray2d(width, height);
     this.#pot_cache = new FloatArray2d(width, height);
+    this.#gpu = new GPU.GPU();
 
   }
   #saveInitialState() {
@@ -209,6 +212,26 @@ class QuantumData {
       }      
     }
   }
+  #unpack(arrayProperty) {
+    const unpackedData = [];
+    for(let x = 0; x < this.width; x++) {
+      const thisRow = [];
+      for(let y = 0; y < this.height; y++) {
+        thisRow.push(arrayProperty.get(x, y));
+      }
+      unpackedData.push(thisRow);
+    }
+    return unpackedData
+  }
+  #repack(unpackedData, width, height) {
+    const repackedData = new FloatArray2d(width, height);
+    for(let x = 0; x < this.width; x++) {
+      for(let y = 0; y < this.height; y++) {
+        repackedData.set(x, y, unpackedData[y][x]); // Data appears to be transposed at some point during unpacking and operating on it. Switch it back now.
+      }
+    }
+    return repackedData; 
+  }
   step() {
     if(!this.running) {
       this.running = true;
@@ -220,6 +243,45 @@ class QuantumData {
     this.#controlstate.step();
     this.#reset_potential_cache();
     // "boundaries are never computed, hence left at 0"
+
+    // No data (including class properties) can be read outside of kernel, so they must be unpacked into a normal 2D array now and passed in when the kernel is called.
+    // In future the clear solution is to store properties in this form throughout instead of converting back and forth, but this will suffice for now as a test.
+    let unpackedReal = this.#unpack(this.#real); // Let rather than const as will be replaced with result of computeReal.
+    let unpackedImag = this.#unpack(this.#imag); // Let rather than const as will be replaced with result of computeImag.
+    const unpackedWalls = this.#unpack(this.#walls);
+    const unpackedSinkMult = this.#unpack(this.sink_mult);
+    const unpackedPotCache = this.#unpack(this.#pot_cache);
+
+    // Create a new "kernel" (GPU-executed function), stored in "computeReal", defined as follows:
+    const computeReal = this.#gpu.createKernel(function(width, height, delta_t, real, imag, walls, sink_mult, pot_cache) {
+      // Grab thread x and y now for easy reference later.
+      const x = this.thread.x;
+      const y = this.thread.y;
+
+      // Clumsily skipping boundaries. Check if a better alternative exists later.
+      // If not this can probably be combined with the wall check to make something more elegant.
+      if(x < 1 || x >= width - 1 || y < 1 || y >= height - 1) {
+        return real[x][y]; // If at a boundry no update should occur, so return existing value. (Maybe 0 would be better?)
+      }
+
+      // Contents of original double-nested loop. 
+      if(walls[x][y] == 0) { // Booleans passed to/read by kernel as 1 or 0 instead of true or false.
+        // Return the new value of real[x][y]. Calculation is perfect copy of original, just referencing normal 2D array instead of custom object.
+        return sink_mult[x][y] * 
+          (real[x][y] - delta_t * (-0.5 *
+            (imag[x][y-1]+imag[x][y+1]+imag[x-1][y]+imag[x+1][y]-4*imag[x][y])
+          + pot_cache[x][y] * imag[x][y]));
+      } else {
+        return real [x][y]; // If a wall is present no update should occur, so return existing value. (Maybe 0 would be better?)
+      }
+    }).setOutput([this.height, this.width]); // Set size of kernel output. Counter-intuitively, the y-dimension must be supplied before the x-dimension.
+
+    // Call computeReal with unpacked parameters, and save the result in unpackedReal for repacking later (and use in computeImag).
+    unpackedReal = computeReal(this.width, this.height, this.#delta_t, unpackedReal, unpackedImag, unpackedWalls, unpackedSinkMult, unpackedPotCache);
+    this.#real.setEqualTo(this.#repack(unpackedReal, this.width, this.height)); // Unpack result into #real.
+
+    /* Old non-GPU updating of real component commented out:
+    
     for(let y=1;y<this.height-1;y++) {
       for(let x=1;x<this.width-1;x++) {
         if(!this.#walls.get(x,y)) { //Real component "fixed" at last!!!
@@ -231,6 +293,8 @@ class QuantumData {
         }
       }      
     }
+    */
+
     // "I have inlined del2, it does make it faster"
 		// "Inlining could happen automatically with vm options -XX:FreqInlineSize=50 -XX:MaxInlineSize=50"
 		// "But these are not universally supported or guaranteed not to change in future"
@@ -521,6 +585,7 @@ class ControlState {
 
 
 // MAIN METHOD -----------------------------------------------------------------------------------------------------------------------------------
+
 // Retrieving data from HTML.
 const canvas = document.getElementById("game"); // Grab canvas from HTML
 const ctx = canvas.getContext("2d"); // Create 2D context.
