@@ -217,10 +217,6 @@ class QuantumData {
       this.#saveInitialState();
       this.#ensure_no_positive_potential();
     }
-    //Unsure where these logs went in your original code, just shoved haphazardly in here for now. Placement doesn't seem to affect values.
-    console.log("walls.get(x,y) " + this.#walls.get(100,100));
-    console.log("sink_mult.get(x,y) " + this.sink_mult.get(100,100));
-    console.log("real.get(x,y) " + this.#real.get(100,100));
     this.#controlstate.step();
     this.#reset_potential_cache();
     // "boundaries are never computed, hence left at 0"
@@ -235,10 +231,6 @@ class QuantumData {
         }
       }      
     }
-    console.log("delta_t " + this.#delta_t);
-    console.log("(imag.get(x,y-1)+imag.get(x,y+1)+imag.get(x-1,y)+imag.get(x+1,y)-4*imag.get(x,y)) " + (this.#imag.get(100,99)+this.#imag.get(100,101)+this.#imag.get(99,100)+this.#imag.get(101,100)-4*this.#imag.get(100,100)));
-    console.log("pot_cache.get(x,y) " + this.#pot_cache.get(100,100));
-    console.log("imag.get(x,y) " + this.#imag.get(100,100));
     // "I have inlined del2, it does make it faster"
 		// "Inlining could happen automatically with vm options -XX:FreqInlineSize=50 -XX:MaxInlineSize=50"
 		// "But these are not universally supported or guaranteed not to change in future"
@@ -253,9 +245,6 @@ class QuantumData {
         }
       }      
     }
-    console.log("after update, real.get(x,y) " + this.#real.get(100,100));
-    console.log("(real.get(x,y-1)+real.get(x,y+1)+real.get(x-1,y)+real.get(x+1,y)-4*real.get(x,y)) " + (this.#real.get(100,99)+this.#real.get(100,101)+this.#real.get(99,100)+this.#real.get(101,100)-4*this.#real.get(100,100)));
-    console.log("after update, imag.get(x,y) " + this.#imag.get(100,100));
   }
   #setupSinkMult() {
 		// "flood fill sink_mult with 0 where not a sink; otherwise distance in pixels from non-sink"
