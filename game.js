@@ -1,6 +1,3 @@
-// Git working!
-// Huzzah!
-
 // Code throughout adapts, translates, and expands upon original Quantum Marble Maze by Dr. Crispin Cooper
 // Taken from "fiftysevendegreesofrad" on GitHub, v1.0 formalized 17-05-2024
 // Accessed 25-01-2025
