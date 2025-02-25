@@ -156,7 +156,12 @@ class QuantumData {
 
     // "if tilting 2 directions at once reduce tilt to compensate"
     const totalslope = Math.abs(this.#controlstate.getXSlope())+Math.abs(this.#controlstate.getYSlope());
-    const tilt = (totalslope<=1) ? this.#maxtilt : this.#maxtilt/totalslope;
+    let tilt = 0;
+    if(totalslope <= 1) {
+      tilt = this.#maxtilt;
+    } else {
+      tilt = this.#maxtilt/totalslope;
+    }
 
     // "compute desired relative potentials of corners"
     const biggerdim = Math.max(this.width, this.height);
@@ -285,6 +290,10 @@ class QuantumData {
         this.sink_mult.set(x,y,Math.exp(-Math.pow(dist/2,2)*suddenness));
       }      
     }
+  }
+  // VERY temp
+  getCS() {
+    return this.#controlstate;
   }
 }
 
@@ -472,16 +481,40 @@ class ControlState {
     this.cursordisabled = false;
   }
   up = false; down = false; left = false; right = false;
+  set(key, value) {
+    switch(key) {
+      case "ArrowRight":
+        this.right = value;
+        break;
+      case "ArrowLeft":
+        this.left = value;
+        break;
+      case "ArrowUp":
+        this.up = value;
+        break;
+      case "ArrowDown":
+        this.down = value;
+        break;
+    }
+  }
   #getTargetXSlope() {
-    if(this.left ^ this.right) {
-      return this.left?-1:1;
+    if(this.left && this.right) {
+      return 0;
+    } else if(this.left) {
+      return -1;
+    } else if (this.right){
+      return 1;
     } else {
       return 0;
     }
   }
   #getTargetYSlope() {
-    if(this.up ^ this.down) {
-      return this.up?-1:1;
+    if(this.up && this.down) {
+      return 0;
+    } else if(this.up) {
+      return -1;
+    } else if (this.down){
+      return 1;
     } else {
       return 0;
     }
@@ -530,6 +563,18 @@ const manager = new LevelManger(); // Create new LevelManager (top level object 
 
 manager.init(0.1, 2.5, 1.6/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. dt = 0.1, maxtilt = 2.5, thousanditertimesecs = 1.6/1.5 - all values taken from c-bounce.xml
 manager.addGaussianQUnits(200, 109, 2, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values taken from c-bounce.xml and then tweaked.
+
+// Adding and binding key listeners.
+document.addEventListener('keydown', keyDownEvent);
+document.addEventListener('keyup', keyUpEvent);
+
+function keyDownEvent(e) {
+    manager.getQD().getCS().set(e.code, true);
+}
+
+function keyUpEvent(e) {
+  manager.getQD().getCS().set(e.code, false);
+}
 
 // Begin implementation of UpdateTask.run()
 const gfxframetime = 33000000; // "30 fps"
