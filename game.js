@@ -529,7 +529,7 @@ const ctx = canvas.getContext("2d"); // Create 2D context.
 const manager = new LevelManger(); // Create new LevelManager (top level object at the moment)
 
 manager.init(0.1, 2.5, 1.6/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. dt = 0.1, maxtilt = 2.5, thousanditertimesecs = 1.6/1.5 - all values taken from c-bounce.xml
-manager.addGaussianQUnits(200, 109, 20, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values taken from c-bounce.xml and then tweaked.
+manager.addGaussianQUnits(200, 109, 2, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values taken from c-bounce.xml and then tweaked.
 
 // Begin implementation of UpdateTask.run()
 const gfxframetime = 33000000; // "30 fps"
