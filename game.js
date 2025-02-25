@@ -225,7 +225,7 @@ class QuantumData {
         if(!this.#walls.get(x,y)) { //Real component "fixed" at last!!!
           this.#real.set(x,y,
             this.sink_mult.get(x,y)*
-          (this.#real.get(x,y) - this.#delta_t * (-0.5 *
+          (this.#real.get(x,y) + this.#delta_t * (-0.5 *
             (this.#imag.get(x,y-1)+this.#imag.get(x,y+1)+this.#imag.get(x-1,y)+this.#imag.get(x+1,y)-4*this.#imag.get(x,y))
           + this.#pot_cache.get(x,y)*this.#imag.get(x,y))));
         }
