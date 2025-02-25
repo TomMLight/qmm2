@@ -121,7 +121,6 @@ class QuantumData {
     this.sink_mult = new FloatArray2d(width, height);
     this.#levelDesignPotential = new FloatArray2d(width, height);
     this.#pot_cache = new FloatArray2d(width, height);
-
   }
   #saveInitialState() {
     this.#init_real.setEqualTo(this.#real);
@@ -135,7 +134,7 @@ class QuantumData {
     const omegax = 2*Math.PI*fx; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
     const omegay = 2*Math.PI*fy; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
     for(let x=1;x<this.width-1;x++) {
-      for(let y=1;y<this.width-1;y++) {
+      for(let y=1;y<this.height-1;y++) {
         const r2 = (x-xc)*(x-xc)+(y-yc)*(y-yc);
         const vr = a * Math.exp(-r2/d)
             * Math.cos(omegax*x/this.width)
@@ -295,6 +294,10 @@ class QuantumData {
   getCS() {
     return this.#controlstate;
   }
+  // ALSO VERY temp
+  getWall(x, y) {
+    return this.#walls.get(x, y);
+  }
 }
 
 // Partial port of class from QuantumData.java in original
@@ -351,6 +354,9 @@ class GameRender {
       for (let x = 0; x < this.qd.width; x++) {
         const point = showpotential ? new Complex(0, 0) : this.qd.get(x,y) // No level potentials present at the moment, so imaginary component always 0.
         this.data[x + this.qd.width * y] = this.colourmap.process(point);
+        if(this.qd.getWall(x, y)) {
+          this.data[x + this.qd.width * y] = [100, 100, 100, 255];
+        }
       }
     }
     
