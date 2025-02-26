@@ -49,6 +49,10 @@ function graphicsLoop() {
   }
   requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
 }
+
+function newMatrix(width, height, defaultValue) {
+  return new Array(width).fill(defaultValue).map(() => new Array(height).fill(defaultValue));
+}
 //------------------------------------------------------------------------------------------------------------------------------------------------
 
 
@@ -63,37 +67,6 @@ class Complex {
   #real; #imag; // final float
   constructor(r = 0, i = 0) {this.#real = r; this.#imag = i;} // Preserving default values of 0 from original.
   mod2() {return this.#real*this.#real+this.#imag*this.#imag} //NOTE TO SELF: MOD2 STANDS FOR MODULUS SQUARED!!!
-}
-
-// Partial port of class from QuantumData.java in original
-class FloatArray2d {
-  #data; // float[]
-  #width; // int
-  constructor(width, height) {
-    this.#data = new Float32Array(width * height).fill(0); //Float32Array closest to float[] in Java. In Java arrays are initialized with 0/False/Null, whereas they are left undefined in JavaScript. fill() fixes this.
-    this.#width = width;
-  }
-  setEqualTo(other) {
-    this.#width = other.getWidth();  // getWidth() necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
-    this.#data = [...other.getData()]; // Spread operator used in this way equivalent to .clone() in Java. getData() necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
-  }
-  get(x, y) {return this.#data[x+this.#width*y];}
-  set(x, y, v) {this.#data[x+this.#width*y]=v;}
-  getWidth() {return this.#width;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
-  getData() {return this.#data;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
-}
-
-// Partial port of class from QuantumData.java in original
-class BoolArray2d {
-  #data; // final boolean[]
-  #width; // int
-  constructor(width, height) {
-    this.#data = new Array(width * height).fill(false); //In Java arrays are initialized with 0/False/Null, whereas they are left undefined in JavaScript. fill() fixes this.
-    this.#width = width;
-  }
-  width() {return this.#width;}
-  get(x,y) {return this.#data[x+this.#width*y];}
-  set(x,y,v) {this.#data[x+this.#width*y]=v;}
 }
 
 // Partial port of class from QuantumData.java in original
@@ -114,21 +87,21 @@ class QuantumData {
     this.#controlstate = ks;
     this.width = width;
     this.height = height;
-    this.#real = new FloatArray2d(width, height);
-    this.#imag = new FloatArray2d(width, height);
-    this.#init_real = new FloatArray2d(width, height);
-    this.#init_imag = new FloatArray2d(width, height);
-    this.#walls = new BoolArray2d(width, height);
-    this.#sink = new BoolArray2d(width, height);
-    this.sink_mult = new FloatArray2d(width, height);
-    this.#levelDesignPotential = new FloatArray2d(width, height);
-    this.#pot_cache = new FloatArray2d(width, height);
+    this.#real = newMatrix(width, height, 0);
+    this.#imag = newMatrix(width, height, 0);
+    this.#init_real = newMatrix(width, height, 0);
+    this.#init_imag = newMatrix(width, height, 0);
+    this.#walls = newMatrix(width, height, false);
+    this.#sink = newMatrix(width, height, false);
+    this.sink_mult = newMatrix(width, height, 0);
+    this.#levelDesignPotential = newMatrix(width, height, 0);
+    this.#pot_cache = newMatrix(width, height, 0);
     this.#gpu = new GPU.GPU();
   }
-  #saveInitialState() {
-    this.#init_real.setEqualTo(this.#real);
-    this.#init_imag.setEqualTo(this.#imag);
-  }
+//  #saveInitialState() {
+//    this.#init_real.setEqualTo(this.#real);
+//    this.#init_imag.setEqualTo(this.#imag);
+//  }
   setDeltaT(dt) {this.#delta_t = dt;}
   setMaxTilt(mt) {this.#maxtilt = mt;}
   addGaussian(xc, yc, sigma, fx, fy, ascale) {
@@ -145,12 +118,12 @@ class QuantumData {
         const vi = a * Math.exp(-r2/d)
             * Math.sin(omegax*x/this.width)
             * Math.sin(omegay*y/this.height);
-        this.#real.set(x,y,this.#real.get(x,y)+vr);
-        this.#imag.set(x,y,this.#imag.get(x,y)+vi);
+        this.#real[x][y] = this.#real[x][y] + vr;
+        this.#imag[x][y] = this.#imag[x][y] + vi;
       }
     }
   }
-  get(x, y) {return new Complex(this.#real.get(x,y),this.#imag.get(x,y));}
+  get(x, y) {return new Complex(this.#real[x][y],this.#imag[x][y]);}
   #reset_potential_cache() {
     // "potentials >0 are problematic"
     // "pixel wide band with potential +1 above background - tunnelling"
@@ -187,7 +160,7 @@ class QuantumData {
       let current_pot = left_edge_pot;
       for(let x=1;x<this.width-1;x++) {
         current_pot += x_pot_step;
-        this.#pot_cache.set(x,y,current_pot + this.#levelDesignPotential.get(x,y));
+        this.#pot_cache[x][y] = current_pot + this.#levelDesignPotential[x][y];
       }
     }
   }
@@ -195,59 +168,40 @@ class QuantumData {
     let maxpot = Number.NEGATIVE_INFINITY;
 		for(let x=0;x<this.width;x++) {
       for(let y=0;y<this.height;y++) {
-        const pot = this.#levelDesignPotential.get(x,y)
+        const pot = this.#levelDesignPotential[x][y];
         if(pot>maxpot) {maxpot = pot};
       }
     }
 		for(let x=0;x<this.width;x++) {
       for(let y=0;y<this.height;y++) {
-        this.#levelDesignPotential.set(x, y,
-            this.#levelDesignPotential.get(x,y)-maxpot);
+        this.#levelDesignPotential[x][y] = this.#levelDesignPotential[x][y] - maxpot;
       }
     }
   }
   #add_walls() {
     for(let x=1;x<this.width-1;x++) {
       for(let y=1;y<this.height-1;y++) {
-        if(this.#walls.get(x,y)) {
-          this.#real.set(x,y,0);
-          this.#imag.set(x,y,0);
+        if(this.#walls[x][y]) {
+          this.#real[x][y] = 0;
+          this.#imag[x][y] = 0;
         }
       }      
     }
-  }
-  #unpack(arrayProperty) {
-    const unpackedData = [];
-    for(let x = 0; x < this.width; x++) {
-      const thisRow = [];
-      for(let y = 0; y < this.height; y++) {
-        thisRow.push(arrayProperty.get(x, y));
-      }
-      unpackedData.push(thisRow);
-    }
-    return unpackedData
-  }
-  #repack(unpackedData, width, height) {
-    const repackedData = new FloatArray2d(width, height);
-    for(let x = 0; x < this.width; x++) {
-      for(let y = 0; y < this.height; y++) {
-        repackedData.set(x, y, unpackedData[y][x]); // Data appears to be transposed at some point during unpacking and operating on it. Switch it back now.
-      }
-    }
-    return repackedData; 
   }
   step() {
     if(!this.running) {
       this.running = true;
       this.#setupSinkMult();
       this.#add_walls(); // "must be done before saveInitialState"
-      this.#saveInitialState();
+      //this.#saveInitialState();
       this.#ensure_no_positive_potential();
     }
     this.#controlstate.step();
     this.#reset_potential_cache();
     // "boundaries are never computed, hence left at 0"
 
+    // GPU Test comment block start:
+    /* 
     // No data (including class properties) can be read outside of kernel, so they must be unpacked into a normal 2D array now and passed in when the kernel is called.
     // In future the clear solution is to store properties in this form throughout instead of converting back and forth, but this will suffice for now as a test.
     let unpackedReal = this.#unpack(this.#real); // Let rather than const as will be replaced with result of computeReal.
@@ -284,35 +238,37 @@ class QuantumData {
     unpackedReal = computeReal(this.width, this.height, this.#delta_t, unpackedReal, unpackedImag, unpackedWalls, unpackedSinkMult, unpackedPotCache);
     this.#real.setEqualTo(this.#repack(unpackedReal, this.width, this.height)); // Unpack result into #real.
 
-    /* Old non-GPU updating of real component commented out:
-    
+    // GPU Test comment block end: */
+
+    // Original non-GPU comment block start:
+    //*
     for(let y=1;y<this.height-1;y++) {
       for(let x=1;x<this.width-1;x++) {
-        if(!this.#walls.get(x,y)) { //Real component "fixed" at last!!!
-          this.#real.set(x,y,
-            this.sink_mult.get(x,y)*
-          (this.#real.get(x,y) + this.#delta_t * (-0.5 *
-            (this.#imag.get(x,y-1)+this.#imag.get(x,y+1)+this.#imag.get(x-1,y)+this.#imag.get(x+1,y)-4*this.#imag.get(x,y))
-          + this.#pot_cache.get(x,y)*this.#imag.get(x,y))));
+        if(!this.#walls[x][y]) {
+          this.#real[x][y] = 
+            this.sink_mult[x][y]*
+          (this.#real[x][y] + this.#delta_t * (-0.5 *
+            (this.#imag[x][y-1]+this.#imag[x][y+1]+this.#imag[x-1][y]+this.#imag[x+1][y]-4*this.#imag[x][y])
+          + this.#pot_cache[x][y]*this.#imag[x][y]));
         }
       }      
     }
-    */
 
     // "I have inlined del2, it does make it faster"
 		// "Inlining could happen automatically with vm options -XX:FreqInlineSize=50 -XX:MaxInlineSize=50"
 		// "But these are not universally supported or guaranteed not to change in future"
     for(let y=1;y<this.height-1;y++) {
       for(let x=1;x<this.width-1;x++) {
-        if(!this.#walls.get(x,y)) { // The following calculation is EXACTLY equivalent to original after removing: whitespace, "this." from properties, "#" for private properties, and an "f" in the Java to denote a float.
-          this.#imag.set(x,y,
-              this.sink_mult.get(x,y)*
-            (this.#imag.get(x,y) - this.#delta_t * (-0.5 *
-              (this.#real.get(x,y-1)+this.#real.get(x,y+1)+this.#real.get(x-1,y)+this.#real.get(x+1,y)-4*this.#real.get(x,y))
-            + this.#pot_cache.get(x,y)*this.#real.get(x,y))));
+        if(!this.#walls[x][y]) { // The following calculation is EXACTLY equivalent to original after removing: whitespace, "this." from properties, "#" for private properties, and an "f" in the Java to denote a float.
+          this.#imag[x][y] = 
+              this.sink_mult[x][y]*
+            (this.#imag[x][y] - this.#delta_t * (-0.5 *
+              (this.#real[x][y-1]+this.#real[x][y+1]+this.#real[x-1][y]+this.#real[x+1][y]-4*this.#real[x][y])
+            + this.#pot_cache[x][y]*this.#real[x][y]));
         }
       }      
     }
+    //Original non-GPU comment block end: */
   }
   #setupSinkMult() {
 		// "flood fill sink_mult with 0 where not a sink; otherwise distance in pixels from non-sink"
@@ -325,16 +281,16 @@ class QuantumData {
     const queue = new PriorityQueue((a, b) => a.d < b.d); // Comparator equivalent to Pixel.compareTo in original. I have confirmed with tests that items are pulled in the same order from this and original queue implementation.
     for(let y=0;y<this.height;y++) {
       for(let x=0;x<this.width;x++) {
-        this.sink_mult.set(x,y,Number.POSITIVE_INFINITY);
-        if(!this.#sink.get(x,y) && !this.#walls.get(x,y)) {
+        this.sink_mult[x][y] = Number.POSITIVE_INFINITY;
+        if(!this.#sink[x][y] && !this.#walls[x][y]) {
           queue.push(new Pixel(x, y, 0))
         }
       }      
     }
     while(!queue.isEmpty()) {
       const p = queue.pop(); // pop() equivalent to Java poll()
-      if(this.sink_mult.get(p.x,p.y) > p.d) {
-        this.sink_mult.set(p.x,p.y,p.d);
+      if(this.sink_mult[p.x][p.y] > p.d) {
+        this.sink_mult[p.x][p.y] = p.d;
         for(let dx=-1;dx<=1;dx+=2) {
           for(let dy=-1;dy<=1;dy+=2) {
             const q = new Pixel(p.x+dx,p.y+dy,p.d+1);
@@ -349,8 +305,8 @@ class QuantumData {
     const suddenness = 0.005;
     for(let y=0;y<this.height;y++) {
       for(let x=0;x<this.width;x++) {
-        const dist = this.sink_mult.get(x,y);
-        this.sink_mult.set(x,y,Math.exp(-Math.pow(dist/2,2)*suddenness));
+        const dist = this.sink_mult[x][y];
+        this.sink_mult[x][y] = Math.exp(-Math.pow(dist/2,2)*suddenness);
       }      
     }
   }
@@ -360,7 +316,7 @@ class QuantumData {
   }
   // ALSO VERY temp
   getWall(x, y) {
-    return this.#walls.get(x, y);
+    return this.#walls[x][y];
   }
 }
 
