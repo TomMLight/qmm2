@@ -124,7 +124,6 @@ class QuantumData {
     this.#levelDesignPotential = new FloatArray2d(width, height);
     this.#pot_cache = new FloatArray2d(width, height);
     this.#gpu = new GPU.GPU();
-
   }
   #saveInitialState() {
     this.#init_real.setEqualTo(this.#real);
@@ -138,7 +137,7 @@ class QuantumData {
     const omegax = 2*Math.PI*fx; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
     const omegay = 2*Math.PI*fy; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
     for(let x=1;x<this.width-1;x++) {
-      for(let y=1;y<this.width-1;y++) {
+      for(let y=1;y<this.height-1;y++) {
         const r2 = (x-xc)*(x-xc)+(y-yc)*(y-yc);
         const vr = a * Math.exp(-r2/d)
             * Math.cos(omegax*x/this.width)
@@ -159,7 +158,12 @@ class QuantumData {
 
     // "if tilting 2 directions at once reduce tilt to compensate"
     const totalslope = Math.abs(this.#controlstate.getXSlope())+Math.abs(this.#controlstate.getYSlope());
-    const tilt = (totalslope<=1) ? this.#maxtilt : this.#maxtilt/totalslope;
+    let tilt = 0;
+    if(totalslope <= 1) {
+      tilt = this.#maxtilt;
+    } else {
+      tilt = this.#maxtilt/totalslope;
+    }
 
     // "compute desired relative potentials of corners"
     const biggerdim = Math.max(this.width, this.height);
@@ -287,7 +291,7 @@ class QuantumData {
         if(!this.#walls.get(x,y)) { //Real component "fixed" at last!!!
           this.#real.set(x,y,
             this.sink_mult.get(x,y)*
-          (this.#real.get(x,y) - this.#delta_t * (-0.5 *
+          (this.#real.get(x,y) + this.#delta_t * (-0.5 *
             (this.#imag.get(x,y-1)+this.#imag.get(x,y+1)+this.#imag.get(x-1,y)+this.#imag.get(x+1,y)-4*this.#imag.get(x,y))
           + this.#pot_cache.get(x,y)*this.#imag.get(x,y))));
         }
@@ -350,6 +354,14 @@ class QuantumData {
       }      
     }
   }
+  // VERY temp
+  getCS() {
+    return this.#controlstate;
+  }
+  // ALSO VERY temp
+  getWall(x, y) {
+    return this.#walls.get(x, y);
+  }
 }
 
 // Partial port of class from QuantumData.java in original
@@ -406,6 +418,9 @@ class GameRender {
       for (let x = 0; x < this.qd.width; x++) {
         const point = showpotential ? new Complex(0, 0) : this.qd.get(x,y) // No level potentials present at the moment, so imaginary component always 0.
         this.data[x + this.qd.width * y] = this.colourmap.process(point);
+        if(this.qd.getWall(x, y)) {
+          this.data[x + this.qd.width * y] = [100, 100, 100, 255]; // Shade walls in uniform grey. Functionality ok but feels very hacky maybe fix later.
+        }
       }
     }
     
@@ -536,16 +551,40 @@ class ControlState {
     this.cursordisabled = false;
   }
   up = false; down = false; left = false; right = false;
+  set(key, value) {
+    switch(key) {
+      case "ArrowRight":
+        this.right = value;
+        break;
+      case "ArrowLeft":
+        this.left = value;
+        break;
+      case "ArrowUp":
+        this.up = value;
+        break;
+      case "ArrowDown":
+        this.down = value;
+        break;
+    }
+  }
   #getTargetXSlope() {
-    if(this.left ^ this.right) {
-      return this.left?-1:1;
+    if(this.left && this.right) {
+      return 0;
+    } else if(this.left) {
+      return -1;
+    } else if (this.right){
+      return 1;
     } else {
       return 0;
     }
   }
   #getTargetYSlope() {
-    if(this.up ^ this.down) {
-      return this.up?-1:1;
+    if(this.up && this.down) {
+      return 0;
+    } else if(this.up) {
+      return -1;
+    } else if (this.down){
+      return 1;
     } else {
       return 0;
     }
@@ -594,7 +633,19 @@ const ctx = canvas.getContext("2d"); // Create 2D context.
 const manager = new LevelManger(); // Create new LevelManager (top level object at the moment)
 
 manager.init(0.1, 2.5, 1.6/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. dt = 0.1, maxtilt = 2.5, thousanditertimesecs = 1.6/1.5 - all values taken from c-bounce.xml
-manager.addGaussianQUnits(200, 109, 20, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values taken from c-bounce.xml and then tweaked.
+manager.addGaussianQUnits(200, 109, 2, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values taken from c-bounce.xml and then tweaked.
+
+// Adding and binding key listeners.
+document.addEventListener('keydown', keyDownEvent);
+document.addEventListener('keyup', keyUpEvent);
+
+function keyDownEvent(e) {
+    manager.getQD().getCS().set(e.code, true);
+}
+
+function keyUpEvent(e) {
+  manager.getQD().getCS().set(e.code, false);
+}
 
 // Begin implementation of UpdateTask.run()
 const gfxframetime = 33000000; // "30 fps"
