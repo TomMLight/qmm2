@@ -37,10 +37,10 @@ function graphicsLoop() {
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
       manager.getQD().step();
     } else {
-      console.log("Should sleep!"); // This is never *ever* called in my tests, so I haven't actually implemented the sleeping yet!
+      //console.log("Should sleep!"); // This is never *ever* called in my tests, so I haven't actually implemented the sleeping yet!
     }
     const currenttime = nanoTime();
-    if(currenttime - lastframetime > gfxframetime) {
+    if(quantumframes_this_frame >= quantum_frames_per_gfx_frame) { //if(currenttime - lastframetime > gfxframetime) {
       quantumframes_this_frame = 0;
       lastframetime = currenttime;
       manager.updateGraphics();
@@ -125,6 +125,10 @@ class QuantumData {
   #saveInitialState() {
     this.#init_real.setEqualTo(this.#real);
     this.#init_imag.setEqualTo(this.#imag);
+  }
+  resetInitialState() {
+    this.#real.setEqualTo(this.#init_real);
+    this.#imag.setEqualTo(this.#init_imag);
   }
   setDeltaT(dt) {this.#delta_t = dt;}
   setMaxTilt(mt) {this.#maxtilt = mt;}
@@ -391,8 +395,14 @@ class LevelManger {
     return this.qd;
   }
   updateGraphics() {
+    if(this.controlstate.resetRequested()) {
+      this.resetInitialState();
+    }
     this.gr.update();
     ctx.putImageData(this.gr.getImage(), 0, 0); // Draw data in gr.#image to canvas. Replaces lc.repaint in original.
+  }
+  resetInitialState() {
+    this.qd.resetInitialState();
   }
   quantumFrameTimeNanos() {
     return this.#quantumframetimenanos;
@@ -486,40 +496,55 @@ class ControlState {
     this.yslope = 0;
     this.cursordisabled = false;
   }
-  up = false; down = false; left = false; right = false;
+  resetRequested() {
+    // "only called once so can return current value and reset"
+    if(this.#reset) {
+      this.#reset = false;
+      return true;
+    } else {
+      return false;
+    }
+  }
+  #up = false; #down = false; #left = false; #right = false; #reset = false;
+  #queueReset() {
+    this.#reset = true;
+  }
   set(key, value) {
     switch(key) {
       case "ArrowRight":
-        this.right = value;
+        this.#right = value;
         break;
       case "ArrowLeft":
-        this.left = value;
+        this.#left = value;
         break;
       case "ArrowUp":
         this.up = value;
         break;
       case "ArrowDown":
-        this.down = value;
+        this.#down = value;
+        break;
+      case "KeyR":
+        this.#queueReset();
         break;
     }
   }
   #getTargetXSlope() {
-    if(this.left && this.right) {
+    if(this.#left && this.#right) {
       return 0;
-    } else if(this.left) {
+    } else if(this.#left) {
       return -1;
-    } else if (this.right){
+    } else if (this.#right){
       return 1;
     } else {
       return 0;
     }
   }
   #getTargetYSlope() {
-    if(this.up && this.down) {
+    if(this.#up && this.#down) {
       return 0;
-    } else if(this.up) {
+    } else if(this.#up) {
       return -1;
-    } else if (this.down){
+    } else if (this.#down){
       return 1;
     } else {
       return 0;
