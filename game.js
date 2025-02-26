@@ -355,7 +355,7 @@ class GameRender {
         const point = showpotential ? new Complex(0, 0) : this.qd.get(x,y) // No level potentials present at the moment, so imaginary component always 0.
         this.data[x + this.qd.width * y] = this.colourmap.process(point);
         if(this.qd.getWall(x, y)) {
-          this.data[x + this.qd.width * y] = [100, 100, 100, 255];
+          this.data[x + this.qd.width * y] = [100, 100, 100, 255]; // Shade walls in uniform grey. Functionality ok but feels very hacky maybe fix later.
         }
       }
     }
