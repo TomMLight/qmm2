@@ -82,6 +82,7 @@ class QuantumData {
   #controlstate; // ControlState
 
   #gpu // To save calling the constructor every time QuantumData.step() is called, a new gpu property is added to the class for future reference.
+  #updateCompontent // Kernel used to update real and imaginary components of simulation in step().
 
   constructor(width, height, ks) {
     this.#controlstate = ks;
@@ -96,7 +97,34 @@ class QuantumData {
     this.sink_mult = newMatrix(width, height, 0);
     this.#levelDesignPotential = newMatrix(width, height, 0);
     this.#pot_cache = newMatrix(width, height, 0);
-    this.#gpu = new GPU.GPU();
+    this.#setupKernels(); // Kernels are several lines long, so in my opinion having them stored seperately makes code more readable.
+  }
+  #setupKernels() {
+    this.#gpu = new GPU.GPU(); // First create a new GPU object.
+
+    // updateCompontent - Handles updating real and imaginary (two seperate calls) components of simulation in step().
+    this.#updateCompontent = this.#gpu.createKernel(function(width, height, delta_t, update, reference, walls, sink_mult, pot_cache, sign) {
+      // Grab thread x and y now for easy reference later. Due to height and width values being transposed at end of kernel, these values must be flipped.
+      const x = this.thread.y; // Values must be transposed!
+      const y = this.thread.x; // Values must be transposed!
+
+      // Clumsily skipping boundaries. Check if a better alternative exists later.
+      // If not this can probably be combined with the wall check to make something more elegant.
+      if(x < 1 || x >= width - 1 || y < 1 || y >= height - 1) {
+        return update[x][y]; // If at a boundry no update should occur, so return existing value. (This is likely always 0, so returning 0 straight away would be quicker than a memory access. However, at this stage I am not 100% certain so I'm leaving it like this for now.)
+      }
+
+      // Contents of original double-nested loop. 
+      if(walls[x][y] == 0) { // Booleans passed to/read by kernel as 1 or 0 instead of true or false.
+        // Return the new value of real[x][y].
+        return sink_mult[x][y] * 
+          (update[x][y] + delta_t * (-0.5 * sign * // Multiplication by "sign" is added so kernel can be reused for both real and imaginary components. The only difference between the two kernels would be which component is being updated versus which remains static (just change order of parameters) and if the change is an addition or subtraction - which can be re-written as an addition or an addition of a negative number (sign value of 1 or -1).
+            (reference[x][y-1]+reference[x][y+1]+reference[x-1][y]+reference[x+1][y]-4*reference[x][y])
+          + pot_cache[x][y] * reference[x][y]));
+      } else {
+        return update [x][y]; // If a wall is present no update should occur, so return existing value. (This is likely always 0, so returning 0 straight away would be quicker than a memory access. However, at this stage I am not 100% certain so I'm leaving it like this for now.)
+      }
+    }).setOutput([this.height, this.width]); // Set size of kernel output. In order for matrix[x][y] to avoid being out of range, height must be supplied before width. However, as a result, this.thread.x/y must also be transposed inside the kernel to account for this.
   }
 //  #saveInitialState() {
 //    this.#init_real.setEqualTo(this.#real);
@@ -201,47 +229,15 @@ class QuantumData {
     // "boundaries are never computed, hence left at 0"
 
     // GPU Test comment block start:
-    /* 
-    // No data (including class properties) can be read outside of kernel, so they must be unpacked into a normal 2D array now and passed in when the kernel is called.
-    // In future the clear solution is to store properties in this form throughout instead of converting back and forth, but this will suffice for now as a test.
-    let unpackedReal = this.#unpack(this.#real); // Let rather than const as will be replaced with result of computeReal.
-    let unpackedImag = this.#unpack(this.#imag); // Let rather than const as will be replaced with result of computeImag.
-    const unpackedWalls = this.#unpack(this.#walls);
-    const unpackedSinkMult = this.#unpack(this.sink_mult);
-    const unpackedPotCache = this.#unpack(this.#pot_cache);
-
-    // Create a new "kernel" (GPU-executed function), stored in "computeReal", defined as follows:
-    const computeReal = this.#gpu.createKernel(function(width, height, delta_t, real, imag, walls, sink_mult, pot_cache) {
-      // Grab thread x and y now for easy reference later.
-      const x = this.thread.x;
-      const y = this.thread.y;
-
-      // Clumsily skipping boundaries. Check if a better alternative exists later.
-      // If not this can probably be combined with the wall check to make something more elegant.
-      if(x < 1 || x >= width - 1 || y < 1 || y >= height - 1) {
-        return real[x][y]; // If at a boundry no update should occur, so return existing value. (Maybe 0 would be better?)
-      }
-
-      // Contents of original double-nested loop. 
-      if(walls[x][y] == 0) { // Booleans passed to/read by kernel as 1 or 0 instead of true or false.
-        // Return the new value of real[x][y]. Calculation is perfect copy of original, just referencing normal 2D array instead of custom object.
-        return sink_mult[x][y] * 
-          (real[x][y] - delta_t * (-0.5 *
-            (imag[x][y-1]+imag[x][y+1]+imag[x-1][y]+imag[x+1][y]-4*imag[x][y])
-          + pot_cache[x][y] * imag[x][y]));
-      } else {
-        return real [x][y]; // If a wall is present no update should occur, so return existing value. (Maybe 0 would be better?)
-      }
-    }).setOutput([this.height, this.width]); // Set size of kernel output. Counter-intuitively, the y-dimension must be supplied before the x-dimension.
-
-    // Call computeReal with unpacked parameters, and save the result in unpackedReal for repacking later (and use in computeImag).
-    unpackedReal = computeReal(this.width, this.height, this.#delta_t, unpackedReal, unpackedImag, unpackedWalls, unpackedSinkMult, unpackedPotCache);
-    this.#real.setEqualTo(this.#repack(unpackedReal, this.width, this.height)); // Unpack result into #real.
+    //* 
+    // Call updateCompontent on both components, flipping which is static/update and the sign.
+    this.#real = this.#updateCompontent(this.width, this.height, this.#delta_t, this.#real, this.#imag, this.#walls, this.sink_mult, this.#pot_cache, 1);
+    this.#imag = this.#updateCompontent(this.width, this.height, this.#delta_t, this.#imag, this.#real, this.#walls, this.sink_mult, this.#pot_cache, -1);
 
     // GPU Test comment block end: */
 
     // Original non-GPU comment block start:
-    //*
+    /*
     for(let y=1;y<this.height-1;y++) {
       for(let x=1;x<this.width-1;x++) {
         if(!this.#walls[x][y]) {
