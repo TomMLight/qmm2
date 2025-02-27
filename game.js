@@ -378,18 +378,20 @@ class LevelManger {
   gr; // GameRender
   controlstate; // ControlState
   #quantumframetimenanos; // long
+  #scale; // float
   constructor() {
     this.controlstate = new ControlState();
   }
-  init(dt, maxtilt, thousanditertimesecs) {
-    this.qd = new QuantumData(canvas.width, canvas.height, this.controlstate); // I don't really understand how scale works in the original? As I'm not yet parsing levels there's no real need, so just pass canvas dimensions instead.
+  init(scale, dt, maxtilt, thousanditertimesecs) {
+    this.#scale = scale;
+    this.qd = new QuantumData(Math.trunc(canvas.width/scale), Math.trunc(canvas.height/scale), this.controlstate);
     this.qd.setDeltaT(dt);
     this.qd.setMaxTilt(maxtilt);
     this.gr = new GameRender(this.qd);
     this.#quantumframetimenanos = Math.trunc(thousanditertimesecs/1000*1000000000); //Math.trunc closest to casting to long.
   }
-  addGaussianQUnits(x, y, sigma, px, py, a) {
-    this.qd.addGaussian(x, y, sigma, px, py, a);
+  addGaussian(x, y, sigma, px, py, a) {
+    this.qd.addGaussian(Math.trunc(x/this.#scale), Math.trunc(y/this.#scale), sigma, Math.trunc(px/this.#scale), Math.trunc(py/this.#scale), a);
   }
   getQD() {
     return this.qd;
@@ -399,7 +401,9 @@ class LevelManger {
       this.resetInitialState();
     }
     this.gr.update();
-    ctx.putImageData(this.gr.getImage(), 0, 0); // Draw data in gr.#image to canvas. Replaces lc.repaint in original.
+    // Following two lines replace lc.repaint in the original: clear canvas and then draw data in gr.#image to it.
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    createImageBitmap(this.gr.getImage()).then(renderer => ctx.drawImage(renderer, 0, 0, canvas.width, canvas.height)); // Creates new bitmap image using imageData and then scales it. This code was taken from Stack Overflow post made by user "Kaiido" on 18-07-2018. Accessed 27-02-2025. https://stackoverflow.com/questions/51387989/change-image-size-with-ctx-putimagedata
   }
   resetInitialState() {
     this.qd.resetInitialState();
@@ -518,7 +522,7 @@ class ControlState {
         this.#left = value;
         break;
       case "ArrowUp":
-        this.up = value;
+        this.#up = value;
         break;
       case "ArrowDown":
         this.#down = value;
@@ -592,8 +596,8 @@ const ctx = canvas.getContext("2d"); // Create 2D context.
 // Setting up objects.
 const manager = new LevelManger(); // Create new LevelManager (top level object at the moment)
 
-manager.init(0.1, 2.5, 1.6/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. dt = 0.1, maxtilt = 2.5, thousanditertimesecs = 1.6/1.5 - all values taken from c-bounce.xml
-manager.addGaussianQUnits(200, 109, 2, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values taken from c-bounce.xml and then tweaked.
+manager.init(2.5, 0.1, 10, 5/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. scale = 2.5, dt = 0.1, maxtilt = 10, thousanditertimesecs = 5/1.5 - all values taken from toofast.xml
+manager.addGaussian(153, 263, 10, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values again taken from toofast.xml.
 
 // Adding and binding key listeners.
 document.addEventListener('keydown', keyDownEvent);
