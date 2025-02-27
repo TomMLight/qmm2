@@ -25,26 +25,29 @@ function nanoTime() {
   return performance.now() * 1_000_000 // Converting milliseconds to nanoseconds.
 }
 
-// Partial port of UpdateTask.run() from GameWindow.java in original, hacked to get requestAnimationFrame() to work.
-function graphicsLoop() {
+// Partial port of UpdateTask.run() from GameWindow.java in original, hacked to get requestAnimationFrame() to work. Async so sleep functionality works.
+async function graphicsLoop() {
   // In the original, there is a main loop that breaks when the goal is sounded, and calls a repaint when a certain amount of time has passed.
   // I have struggled greatly to directly port this to JavaScript due to requestAnimationFrame, which as far as I can tell is the only way to achieve runtime animation.
   // If this is not the case, I will fix this asap.
   // Instead, this loop just executes until it is time to draw a new gfx frame, when it exits and recursively calls requestAnimationFrame again. 
-  let loop = true;
-  while(loop) {
+  while(true) {
     quantumframes_this_frame++;
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
       manager.getQD().step();
     } else {
-      //console.log("Should sleep!"); // This is never *ever* called in my tests, so I haven't actually implemented the sleeping yet!
+      const timesincelastframe = nanoTime() - lastframetime;
+      const sleeptime = gfxframetime - timesincelastframe;
+      if(sleeptime > 0) {
+        await new Promise(r => setTimeout(r, sleeptime/1000000)); // Sleeps for a number of milliseconds equal to argument provided. This code was taken from Stack Overflow post made by user "Dan Dascalescu" on 18-07-2018, edited by "blackgreen♦" on 03-04-2024. Accessed 27-02-2025. https://stackoverflow.com/questions/951021/what-is-the-javascript-version-of-sleep
+      }
     }
     const currenttime = nanoTime();
-    if(quantumframes_this_frame >= quantum_frames_per_gfx_frame) { //if(currenttime - lastframetime > gfxframetime) {
+    if(currenttime - lastframetime > gfxframetime) { //"30fps"
       quantumframes_this_frame = 0;
       lastframetime = currenttime;
       manager.updateGraphics();
-      loop = false; // New graphics frame needed, exit the loop and request new frame.
+      break; // New graphics frame needed, exit the loop and request new frame.
     }
   }
   requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
@@ -604,7 +607,7 @@ document.addEventListener('keydown', keyDownEvent);
 document.addEventListener('keyup', keyUpEvent);
 
 function keyDownEvent(e) {
-    manager.getQD().getCS().set(e.code, true);
+  manager.getQD().getCS().set(e.code, true);
 }
 
 function keyUpEvent(e) {
