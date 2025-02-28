@@ -25,33 +25,32 @@ function nanoTime() {
   return performance.now() * 1_000_000 // Converting milliseconds to nanoseconds.
 }
 
-// Partial port of UpdateTask.run() from GameWindow.java in original, hacked to get requestAnimationFrame() to work.
-function graphicsLoop() {
+// Partial port of UpdateTask.run() from GameWindow.java in original, hacked to get requestAnimationFrame() to work. Async so sleep functionality works.
+async function graphicsLoop() {
   // In the original, there is a main loop that breaks when the goal is sounded, and calls a repaint when a certain amount of time has passed.
   // I have struggled greatly to directly port this to JavaScript due to requestAnimationFrame, which as far as I can tell is the only way to achieve runtime animation.
   // If this is not the case, I will fix this asap.
   // Instead, this loop just executes until it is time to draw a new gfx frame, when it exits and recursively calls requestAnimationFrame again. 
-  let loop = true;
-  while(loop) {
+  while(true) {
     quantumframes_this_frame++;
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
       manager.getQD().step();
     } else {
-      console.log("Should sleep!"); // This is never *ever* called in my tests, so I haven't actually implemented the sleeping yet!
+      const timesincelastframe = nanoTime() - lastframetime;
+      const sleeptime = gfxframetime - timesincelastframe;
+      if(sleeptime > 0) {
+        await new Promise(r => setTimeout(r, sleeptime/1000000)); // Sleeps for a number of milliseconds equal to argument provided. This code was taken from Stack Overflow post made by user "Dan Dascalescu" on 18-07-2018, edited by "blackgreen♦" on 03-04-2024. Accessed 27-02-2025. https://stackoverflow.com/questions/951021/what-is-the-javascript-version-of-sleep
+      }
     }
     const currenttime = nanoTime();
-    if(currenttime - lastframetime > gfxframetime) {
+    if(currenttime - lastframetime > gfxframetime) { //"30fps"
       quantumframes_this_frame = 0;
       lastframetime = currenttime;
       manager.updateGraphics();
-      loop = false; // New graphics frame needed, exit the loop and request new frame.
+      break; // New graphics frame needed, exit the loop and request new frame.
     }
   }
   requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
-}
-
-function newMatrix(width, height, defaultValue) {
-  return new Array(width).fill(defaultValue).map(() => new Array(height).fill(defaultValue));
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -67,6 +66,39 @@ class Complex {
   #real; #imag; // final float
   constructor(r = 0, i = 0) {this.#real = r; this.#imag = i;} // Preserving default values of 0 from original.
   mod2() {return this.#real*this.#real+this.#imag*this.#imag} //NOTE TO SELF: MOD2 STANDS FOR MODULUS SQUARED!!!
+}
+
+// Partial port of class from QuantumData.java in original
+class FloatArray2d {
+  #data; // float[]
+  #width; // int
+  constructor(width, height) {
+    this.#data = new Float32Array(width * height).fill(0); //Float32Array closest to float[] in Java. In Java arrays are initialized with 0/False/Null, whereas they are left undefined in JavaScript. fill() fixes this.
+    this.#width = width;
+  }
+  setEqualTo(other) {
+    this.#width = other.getWidth();  // getWidth() necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
+    this.#data = [...other.getData()]; // Spread operator used in this way equivalent to .clone() in Java. getData() necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
+  }
+  get(x, y) {return this.#data[x+this.#width*y];}
+  set(x, y, v) {this.#data[x+this.#width*y]=v;}
+  getWidth() {return this.#width;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
+  getData() {return this.#data;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
+  setData(v) {this.#data = v;} // Used to copy results of kernel into array. Maybe temp if I use textures?
+}
+
+// Partial port of class from QuantumData.java in original
+class BoolArray2d {
+  #data; // final boolean[]
+  #width; // int
+  constructor(width, height) {
+    this.#data = new Array(width * height).fill(false); //In Java arrays are initialized with 0/False/Null, whereas they are left undefined in JavaScript. fill() fixes this.
+    this.#width = width;
+  }
+  width() {return this.#width;}
+  get(x,y) {return this.#data[x+this.#width*y];}
+  set(x,y,v) {this.#data[x+this.#width*y]=v;}
+  getData() {return this.#data;} // Need to grab entirety of data to load into GPU.
 }
 
 // Partial port of class from QuantumData.java in original
@@ -88,48 +120,50 @@ class QuantumData {
     this.#controlstate = ks;
     this.width = width;
     this.height = height;
-    this.#real = newMatrix(width, height, 0);
-    this.#imag = newMatrix(width, height, 0);
-    this.#init_real = newMatrix(width, height, 0);
-    this.#init_imag = newMatrix(width, height, 0);
-    this.#walls = newMatrix(width, height, false);
-    this.#sink = newMatrix(width, height, false);
-    this.sink_mult = newMatrix(width, height, 0);
-    this.#levelDesignPotential = newMatrix(width, height, 0);
-    this.#pot_cache = newMatrix(width, height, 0);
+    this.#real = new FloatArray2d(width, height);
+    this.#imag = new FloatArray2d(width, height);
+    this.#init_real = new FloatArray2d(width, height);
+    this.#init_imag = new FloatArray2d(width, height);
+    this.#walls = new BoolArray2d(width, height);
+    this.#sink = new BoolArray2d(width, height);
+    this.sink_mult = new FloatArray2d(width, height);
+    this.#levelDesignPotential = new FloatArray2d(width, height);
+    this.#pot_cache = new FloatArray2d(width, height);
     this.#setupKernels(); // Kernels are several lines long, so in my opinion having them stored seperately makes code more readable.
   }
   #setupKernels() {
-    this.#gpu = new GPU.GPU(); // First create a new GPU object.
+    this.#gpu = new GPU.GPU(); // Create GPU object.
 
-    // updateCompontent - Handles updating real and imaginary (two seperate calls) components of simulation in step().
-    this.#updateCompontent = this.#gpu.createKernel(function(width, height, delta_t, update, reference, walls, sink_mult, pot_cache, sign) {
-      // Grab thread x and y now for easy reference later. Due to height and width values being transposed at end of kernel, these values must be flipped.
-      const x = this.thread.y; // Values must be transposed!
-      const y = this.thread.x; // Values must be transposed!
-
-      // Clumsily skipping boundaries. Check if a better alternative exists later.
-      // If not this can probably be combined with the wall check to make something more elegant.
-      if(x < 1 || x >= width - 1 || y < 1 || y >= height - 1) {
-        return update[x][y]; // If at a boundry no update should occur, so return existing value. (This is likely always 0, so returning 0 straight away would be quicker than a memory access. However, at this stage I am not 100% certain so I'm leaving it like this for now.)
-      }
-
-      // Contents of original double-nested loop. 
-      if(walls[x][y] == 0) { // Booleans passed to/read by kernel as 1 or 0 instead of true or false.
-        // Return the new value of real[x][y].
-        return sink_mult[x][y] * 
-          (update[x][y] + delta_t * (-0.5 * sign * // Multiplication by "sign" is added so kernel can be reused for both real and imaginary components. The only difference between the two kernels would be which component is being updated versus which remains static (just change order of parameters) and if the change is an addition or subtraction - which can be re-written as an addition or an addition of a negative number (sign value of 1 or -1).
-            (reference[x][y-1]+reference[x][y+1]+reference[x-1][y]+reference[x+1][y]-4*reference[x][y])
-          + pot_cache[x][y] * reference[x][y]));
-      } else {
-        return update [x][y]; // If a wall is present no update should occur, so return existing value. (This is likely always 0, so returning 0 straight away would be quicker than a memory access. However, at this stage I am not 100% certain so I'm leaving it like this for now.)
-      }
-    }).setOutput([this.height, this.width]); // Set size of kernel output. In order for matrix[x][y] to avoid being out of range, height must be supplied before width. However, as a result, this.thread.x/y must also be transposed inside the kernel to account for this.
+    // Next, define kernels:
+    
+    // updateComponent - Handles updating real and imaginary (two seperate calls) components of simulation in step().
+    // Takes in various properties of QuantumData, with FloatArray2d objects being passed as their raw 1D "data" property.
+    // Returns a 1D array that can then be copied into the "data" property of that component's FloatArray2d object.
+    // "update" and "ref" are the component being updated and merely referenced respectively.
+    // "sign" allows a toggle between addition and subtraction so kernel can be reused for both real and imaginary component updates.
+    // Simply flip which component is "update" vs "ref" and "sign" from 1 to -1.
+    this.#updateCompontent = this.#gpu.createKernel(function(w, h, delta_t, update, ref, walls, sink_mult, pot_cache, sign) {
+        // Calculate x and y co-ordinates from index in 1D array.
+        const x = this.thread.x % w;
+        const y = Math.floor(this.thread.x / w);
+    
+        // If the co-ordinates are on the border or inside a wall they should not be simulated - return 0.
+        if(x < 1 || x >= w - 1 || y < 1 || y >= h - 1 || walls[x+w*y] == 1) {
+            return 0;
+        }
+    
+        // Else, return updated value of component.
+        return sink_mult[x+w*y] * (update[x+w*y] + sign * delta_t * (-0.5 * (ref[x+w*(y-1)]+ref[x+w*(y+1)]+ref[(x-1)+w*y]+ref[(x+1)+w*y]-4*ref[x+w*y]) + pot_cache[x+w*y]*ref[x+w*y]));
+    }).setOutput([this.width * this.height]); // Set output size to be equal to "data" property of FloatArray2d objects.
   }
-//  #saveInitialState() {
-//    this.#init_real.setEqualTo(this.#real);
-//    this.#init_imag.setEqualTo(this.#imag);
-//  }
+  #saveInitialState() {
+    this.#init_real.setEqualTo(this.#real);
+    this.#init_imag.setEqualTo(this.#imag);
+  }
+  resetInitialState() {
+    this.#real.setEqualTo(this.#init_real);
+    this.#imag.setEqualTo(this.#init_imag);
+  }
   setDeltaT(dt) {this.#delta_t = dt;}
   setMaxTilt(mt) {this.#maxtilt = mt;}
   addGaussian(xc, yc, sigma, fx, fy, ascale) {
@@ -146,12 +180,12 @@ class QuantumData {
         const vi = a * Math.exp(-r2/d)
             * Math.sin(omegax*x/this.width)
             * Math.sin(omegay*y/this.height);
-        this.#real[x][y] = this.#real[x][y] + vr;
-        this.#imag[x][y] = this.#imag[x][y] + vi;
+        this.#real.set(x,y,this.#real.get(x,y)+vr);
+        this.#imag.set(x,y,this.#imag.get(x,y)+vi);
       }
     }
   }
-  get(x, y) {return new Complex(this.#real[x][y],this.#imag[x][y]);}
+  get(x, y) {return new Complex(this.#real.get(x,y),this.#imag.get(x,y));}
   #reset_potential_cache() {
     // "potentials >0 are problematic"
     // "pixel wide band with potential +1 above background - tunnelling"
@@ -188,7 +222,7 @@ class QuantumData {
       let current_pot = left_edge_pot;
       for(let x=1;x<this.width-1;x++) {
         current_pot += x_pot_step;
-        this.#pot_cache[x][y] = current_pot + this.#levelDesignPotential[x][y];
+        this.#pot_cache.set(x,y,current_pot + this.#levelDesignPotential.get(x,y));
       }
     }
   }
@@ -196,22 +230,23 @@ class QuantumData {
     let maxpot = Number.NEGATIVE_INFINITY;
 		for(let x=0;x<this.width;x++) {
       for(let y=0;y<this.height;y++) {
-        const pot = this.#levelDesignPotential[x][y];
+        const pot = this.#levelDesignPotential.get(x,y)
         if(pot>maxpot) {maxpot = pot};
       }
     }
 		for(let x=0;x<this.width;x++) {
       for(let y=0;y<this.height;y++) {
-        this.#levelDesignPotential[x][y] = this.#levelDesignPotential[x][y] - maxpot;
+        this.#levelDesignPotential.set(x, y,
+            this.#levelDesignPotential.get(x,y)-maxpot);
       }
     }
   }
   #add_walls() {
     for(let x=1;x<this.width-1;x++) {
       for(let y=1;y<this.height-1;y++) {
-        if(this.#walls[x][y]) {
-          this.#real[x][y] = 0;
-          this.#imag[x][y] = 0;
+        if(this.#walls.get(x,y)) {
+          this.#real.set(x,y,0);
+          this.#imag.set(x,y,0);
         }
       }      
     }
@@ -221,50 +256,16 @@ class QuantumData {
       this.running = true;
       this.#setupSinkMult();
       this.#add_walls(); // "must be done before saveInitialState"
-      //this.#saveInitialState();
+      this.#saveInitialState();
       this.#ensure_no_positive_potential();
     }
     this.#controlstate.step();
     this.#reset_potential_cache();
-    // "boundaries are never computed, hence left at 0"
 
-    // GPU Test comment block start:
-    //* 
-    // Call updateCompontent on both components, flipping which is static/update and the sign.
-    this.#real = this.#updateCompontent(this.width, this.height, this.#delta_t, this.#real, this.#imag, this.#walls, this.sink_mult, this.#pot_cache, 1);
-    this.#imag = this.#updateCompontent(this.width, this.height, this.#delta_t, this.#imag, this.#real, this.#walls, this.sink_mult, this.#pot_cache, -1);
+    // Run kernels to update real and imaginary components, copying the results into the "data" property of that component's FloatArray2d object.
+    this.#real.setData(this.#updateCompontent(this.width, this.height, this.#delta_t, this.#real.getData(), this.#imag.getData(), this.#walls.getData(), this.sink_mult.getData(), this.#pot_cache.getData(), 1));
+    this.#imag.setData(this.#updateCompontent(this.width, this.height, this.#delta_t, this.#imag.getData(), this.#real.getData(), this.#walls.getData(), this.sink_mult.getData(), this.#pot_cache.getData(), -1)); 
 
-    // GPU Test comment block end: */
-
-    // Original non-GPU comment block start:
-    /*
-    for(let y=1;y<this.height-1;y++) {
-      for(let x=1;x<this.width-1;x++) {
-        if(!this.#walls[x][y]) {
-          this.#real[x][y] = 
-            this.sink_mult[x][y]*
-          (this.#real[x][y] + this.#delta_t * (-0.5 *
-            (this.#imag[x][y-1]+this.#imag[x][y+1]+this.#imag[x-1][y]+this.#imag[x+1][y]-4*this.#imag[x][y])
-          + this.#pot_cache[x][y]*this.#imag[x][y]));
-        }
-      }      
-    }
-
-    // "I have inlined del2, it does make it faster"
-		// "Inlining could happen automatically with vm options -XX:FreqInlineSize=50 -XX:MaxInlineSize=50"
-		// "But these are not universally supported or guaranteed not to change in future"
-    for(let y=1;y<this.height-1;y++) {
-      for(let x=1;x<this.width-1;x++) {
-        if(!this.#walls[x][y]) { // The following calculation is EXACTLY equivalent to original after removing: whitespace, "this." from properties, "#" for private properties, and an "f" in the Java to denote a float.
-          this.#imag[x][y] = 
-              this.sink_mult[x][y]*
-            (this.#imag[x][y] - this.#delta_t * (-0.5 *
-              (this.#real[x][y-1]+this.#real[x][y+1]+this.#real[x-1][y]+this.#real[x+1][y]-4*this.#real[x][y])
-            + this.#pot_cache[x][y]*this.#real[x][y]));
-        }
-      }      
-    }
-    //Original non-GPU comment block end: */
   }
   #setupSinkMult() {
 		// "flood fill sink_mult with 0 where not a sink; otherwise distance in pixels from non-sink"
@@ -277,16 +278,16 @@ class QuantumData {
     const queue = new PriorityQueue((a, b) => a.d < b.d); // Comparator equivalent to Pixel.compareTo in original. I have confirmed with tests that items are pulled in the same order from this and original queue implementation.
     for(let y=0;y<this.height;y++) {
       for(let x=0;x<this.width;x++) {
-        this.sink_mult[x][y] = Number.POSITIVE_INFINITY;
-        if(!this.#sink[x][y] && !this.#walls[x][y]) {
+        this.sink_mult.set(x,y,Number.POSITIVE_INFINITY);
+        if(!this.#sink.get(x,y) && !this.#walls.get(x,y)) {
           queue.push(new Pixel(x, y, 0))
         }
       }      
     }
     while(!queue.isEmpty()) {
       const p = queue.pop(); // pop() equivalent to Java poll()
-      if(this.sink_mult[p.x][p.y] > p.d) {
-        this.sink_mult[p.x][p.y] = p.d;
+      if(this.sink_mult.get(p.x,p.y) > p.d) {
+        this.sink_mult.set(p.x,p.y,p.d);
         for(let dx=-1;dx<=1;dx+=2) {
           for(let dy=-1;dy<=1;dy+=2) {
             const q = new Pixel(p.x+dx,p.y+dy,p.d+1);
@@ -301,8 +302,8 @@ class QuantumData {
     const suddenness = 0.005;
     for(let y=0;y<this.height;y++) {
       for(let x=0;x<this.width;x++) {
-        const dist = this.sink_mult[x][y];
-        this.sink_mult[x][y] = Math.exp(-Math.pow(dist/2,2)*suddenness);
+        const dist = this.sink_mult.get(x,y);
+        this.sink_mult.set(x,y,Math.exp(-Math.pow(dist/2,2)*suddenness));
       }      
     }
   }
@@ -312,7 +313,7 @@ class QuantumData {
   }
   // ALSO VERY temp
   getWall(x, y) {
-    return this.#walls[x][y];
+    return this.#walls.get(x, y);
   }
 }
 
@@ -390,25 +391,35 @@ class LevelManger {
   gr; // GameRender
   controlstate; // ControlState
   #quantumframetimenanos; // long
+  #scale; // float
   constructor() {
     this.controlstate = new ControlState();
   }
-  init(dt, maxtilt, thousanditertimesecs) {
-    this.qd = new QuantumData(canvas.width, canvas.height, this.controlstate); // I don't really understand how scale works in the original? As I'm not yet parsing levels there's no real need, so just pass canvas dimensions instead.
+  init(scale, dt, maxtilt, thousanditertimesecs) {
+    this.#scale = scale;
+    this.qd = new QuantumData(Math.trunc(canvas.width/scale), Math.trunc(canvas.height/scale), this.controlstate);
     this.qd.setDeltaT(dt);
     this.qd.setMaxTilt(maxtilt);
     this.gr = new GameRender(this.qd);
     this.#quantumframetimenanos = Math.trunc(thousanditertimesecs/1000*1000000000); //Math.trunc closest to casting to long.
   }
-  addGaussianQUnits(x, y, sigma, px, py, a) {
-    this.qd.addGaussian(x, y, sigma, px, py, a);
+  addGaussian(x, y, sigma, px, py, a) {
+    this.qd.addGaussian(Math.trunc(x/this.#scale), Math.trunc(y/this.#scale), sigma, Math.trunc(px/this.#scale), Math.trunc(py/this.#scale), a);
   }
   getQD() {
     return this.qd;
   }
   updateGraphics() {
+    if(this.controlstate.resetRequested()) {
+      this.resetInitialState();
+    }
     this.gr.update();
-    ctx.putImageData(this.gr.getImage(), 0, 0); // Draw data in gr.#image to canvas. Replaces lc.repaint in original.
+    // Following two lines replace lc.repaint in the original: clear canvas and then draw data in gr.#image to it.
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    createImageBitmap(this.gr.getImage()).then(renderer => ctx.drawImage(renderer, 0, 0, canvas.width, canvas.height)); // Creates new bitmap image using imageData and then scales it. This code was taken from Stack Overflow post made by user "Kaiido" on 18-07-2018. Accessed 27-02-2025. https://stackoverflow.com/questions/51387989/change-image-size-with-ctx-putimagedata
+  }
+  resetInitialState() {
+    this.qd.resetInitialState();
   }
   quantumFrameTimeNanos() {
     return this.#quantumframetimenanos;
@@ -502,40 +513,55 @@ class ControlState {
     this.yslope = 0;
     this.cursordisabled = false;
   }
-  up = false; down = false; left = false; right = false;
+  resetRequested() {
+    // "only called once so can return current value and reset"
+    if(this.#reset) {
+      this.#reset = false;
+      return true;
+    } else {
+      return false;
+    }
+  }
+  #up = false; #down = false; #left = false; #right = false; #reset = false;
+  #queueReset() {
+    this.#reset = true;
+  }
   set(key, value) {
     switch(key) {
       case "ArrowRight":
-        this.right = value;
+        this.#right = value;
         break;
       case "ArrowLeft":
-        this.left = value;
+        this.#left = value;
         break;
       case "ArrowUp":
-        this.up = value;
+        this.#up = value;
         break;
       case "ArrowDown":
-        this.down = value;
+        this.#down = value;
+        break;
+      case "KeyR":
+        this.#queueReset();
         break;
     }
   }
   #getTargetXSlope() {
-    if(this.left && this.right) {
+    if(this.#left && this.#right) {
       return 0;
-    } else if(this.left) {
+    } else if(this.#left) {
       return -1;
-    } else if (this.right){
+    } else if (this.#right){
       return 1;
     } else {
       return 0;
     }
   }
   #getTargetYSlope() {
-    if(this.up && this.down) {
+    if(this.#up && this.#down) {
       return 0;
-    } else if(this.up) {
+    } else if(this.#up) {
       return -1;
-    } else if (this.down){
+    } else if (this.#down){
       return 1;
     } else {
       return 0;
@@ -576,7 +602,6 @@ class ControlState {
 
 
 // MAIN METHOD -----------------------------------------------------------------------------------------------------------------------------------
-
 // Retrieving data from HTML.
 const canvas = document.getElementById("game"); // Grab canvas from HTML
 const ctx = canvas.getContext("2d"); // Create 2D context.
@@ -584,15 +609,15 @@ const ctx = canvas.getContext("2d"); // Create 2D context.
 // Setting up objects.
 const manager = new LevelManger(); // Create new LevelManager (top level object at the moment)
 
-manager.init(0.1, 2.5, 1.6/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. dt = 0.1, maxtilt = 2.5, thousanditertimesecs = 1.6/1.5 - all values taken from c-bounce.xml
-manager.addGaussianQUnits(200, 109, 2, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values taken from c-bounce.xml and then tweaked.
+manager.init(2.5, 0.1, 10, 5/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. scale = 2.5, dt = 0.1, maxtilt = 10, thousanditertimesecs = 5/1.5 - all values taken from toofast.xml
+manager.addGaussian(153, 263, 10, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values again taken from toofast.xml.
 
 // Adding and binding key listeners.
 document.addEventListener('keydown', keyDownEvent);
 document.addEventListener('keyup', keyUpEvent);
 
 function keyDownEvent(e) {
-    manager.getQD().getCS().set(e.code, true);
+  manager.getQD().getCS().set(e.code, true);
 }
 
 function keyUpEvent(e) {
