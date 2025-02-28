@@ -338,10 +338,7 @@ class AmpColourMap {
     let index = Math.trunc(source*this.#gain);
     if (index>this.#maxindex) index=this.#maxindex;
     const alpha = this.#lookup[index];
-    const red = 255;
-    const green = 255;
-    const blue = 255;
-    return[red, green, blue, alpha]; // In original bit shifting is done here to pack all 4 values into one int. In the original this is a requirement due to how setRGB, but this version has no such constraints. So, I've just returned it as a length 4 array to make my life easier. If this proves to break later I will change it.
+    return alpha; // TEMP - EXPLAIN LATER
   }
   resetGain() {
     this.#gain = this.#maxindex / this.#max;
@@ -359,26 +356,23 @@ class GameRender {
   height() {return Math.trunc(this.qd.height);}
   constructor(source) {
     this.qd = source;
-    this.#image = new ImageData(new Uint8ClampedArray(this.width() * this.height() * 4), this.width()); //ImageData replaced BufferedImage
-    this.data = new Array(this.width()*this.height()); // To avoid bit-shifting back and forth data is a 2D array instead of a 1D array of RGBA values packed into a single int. May attempt bit shifting later to quadruple check this isn't causing issues.
+    this.#image = new ImageData(new Uint8ClampedArray(this.width() * this.height() * 4), this.width()); // ImageData replaced BufferedImage
+    this.data = new Uint8ClampedArray(this.width() * this.height() * 4); // TEMP - EXPLAIN LATER
     this.colourmap = new AmpColourMap();
   }
   update() {
-    const showpotential = false; // "for debugging"
-    // "it may seem perverse to calculate 'data' only to copy it into 'image'"
-    // "rather than just calculate image.  but i profiled and it's faster."
     for (let y = 0; y < this.qd.height; y++) {
       for (let x = 0; x < this.qd.width; x++) {
-        const point = showpotential ? new Complex(0, 0) : this.qd.get(x,y) // No level potentials present at the moment, so imaginary component always 0.
-        this.data[x + this.qd.width * y] = this.colourmap.process(point);
-        if(this.qd.getWall(x, y)) {
-          this.data[x + this.qd.width * y] = [100, 100, 100, 255]; // Shade walls in uniform grey. Functionality ok but feels very hacky maybe fix later.
-        }
+        let coord = (x + this.qd.width * y) * 4;
+        this.data[coord + 0] = 255;
+        this.data[coord + 1] = 255;
+        this.data[coord + 2] = 255;
+        this.data[coord + 3] = this.colourmap.process(this.qd.get(x,y));
       }
     }
     
     this.colourmap.resetGain();
-    this.#image = setRGB(0, 0, this.width(), this.height(), this.data, 0, this.width()); // In the original this is a method that updates the RGB values of 'image'. As imageData cannot be edited once created in JavaScript, this instead returns an ImageData object which replaces the existing one.
+    this.#image = new ImageData(this.data, this.width()); // TEMP - EXPLAIN LATER
   }
   getImage() {
     return this.#image;
