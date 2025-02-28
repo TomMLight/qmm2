@@ -131,6 +131,12 @@ class QuantumData {
     this.#pot_cache = new FloatArray2d(width, height);
     this.#setupKernels(); // Kernels are several lines long, so in my opinion having them stored seperately makes code more readable.
   }
+  getReal() {
+    return this.#real.getData();
+  }
+  getImag() {
+    return this.#imag.getData();
+  }
   #setupKernels() {
     this.#gpu = new GPU.GPU(); // Create GPU object.
 
@@ -307,13 +313,9 @@ class QuantumData {
       }      
     }
   }
-  // VERY temp
+  // Slightly hacky work around to get control state from main function in order to bind event listener.
   getCS() {
     return this.#controlstate;
-  }
-  // ALSO VERY temp
-  getWall(x, y) {
-    return this.#walls.get(x, y);
   }
 }
 
@@ -326,19 +328,47 @@ class AmpColourMap {
   #lookup; // int[]
   #max = 0; // float
   #gain = 0; // float
-  constructor() {
+
+  #gpu; // To save calling the constructor every time process() is called, a new gpu property is added to the class for future reference.
+  // Similarly, kernels are defined once and saved for future use.
+  #mod2;
+  #renderFrame;
+  constructor(size) {
     this.#lookup = new Int32Array(this.#maxindex + 1); //Int32Array closest to int[] in Java.
     for (let i=0;i<this.#maxindex+1;i++) {
       this.#lookup[i] = Math.trunc(255*Math.pow(i/this.#maxindex,this.#gamma)) //Math.trunc() closest to how casting to int works in Java.
     }
+    this.#setupGPU(size);
   }
-  process(c) {
-    const source = c.mod2();
-    if (source>this.#max) this.#max = source;
-    let index = Math.trunc(source*this.#gain);
-    if (index>this.#maxindex) index=this.#maxindex;
-    const alpha = this.#lookup[index];
-    return alpha; // TEMP - EXPLAIN LATER
+  #setupGPU(size) {
+    this.#gpu = new GPU.GPU(); // Create GPU object.
+    
+    // Next, create kernels:
+    // mod2() - Takes in array of complex numbers (one array for each component), and returns the modulus squared of each complex number.
+    this.#mod2 = this.#gpu.createKernel(function(real, imag) {
+      return real[this.thread.x] * real[this.thread.x] + imag[this.thread.x] * imag[this.thread.x];
+    }).setOutput([size]);  // One value for each cell.
+
+    // renderFrame() - Takes in arrays of source strengths, a gain value, an alpha value lookup array, and a max index for that array.
+    // Returns an array of RGBA values for the sources.
+    this.#renderFrame = this.#gpu.createKernel(function(source, gain, maxindex, lookup) {
+      // R, G, and B values should all be 255 - only every 4th value (Alpha) needs to be calculated.
+      if(this.thread.x % 4 != 3) {
+        return 255;
+      }
+
+      // Calculate relative co-ordinate for non-RGBA array.
+      const pos = Math.floor(this.thread.x / 4);
+
+      // Calculate index, cap at "maxIndex", then return corresponding value in "lookup".
+      const index = (Math.min(Math.trunc(source[pos] * gain), maxindex));
+      return lookup[index];
+    }).setOutput([size * 4]); // RGBA channel for each cell = number of cells * 4 channels.
+  }
+  process(real, imag) {
+    const source = this.#mod2(real, imag); // Call mod2 on values to get source strengths.
+    this.#max = Math.max(...source); // Grab max source strength. THIS WILL BE INEFFICIENT WITH TEXTURES, REWRITE?!
+    return Uint8ClampedArray.from(this.#renderFrame(source, this.#gain, this.#maxindex, this.#lookup)); // Render and return frame.
   }
   resetGain() {
     this.#gain = this.#maxindex / this.#max;
@@ -352,27 +382,18 @@ class GameRender {
   qd; // QuantumData
   colourmap; // AmpColourMap (for now)
   #image; // ImageData
-  width() {return Math.trunc(this.qd.width);}
-  height() {return Math.trunc(this.qd.height);}
+  width() {return this.qd.width;}
+  height() {return this.qd.height;}
   constructor(source) {
     this.qd = source;
     this.#image = new ImageData(new Uint8ClampedArray(this.width() * this.height() * 4), this.width()); // ImageData replaced BufferedImage
-    this.data = new Uint8ClampedArray(this.width() * this.height() * 4); // TEMP - EXPLAIN LATER
-    this.colourmap = new AmpColourMap();
+    this.data = new Uint8ClampedArray(this.width() * this.height() * 4); // Stores RGBA values used to create ImageData.
+    this.colourmap = new AmpColourMap(this.width() * this.height()); // Supply size of array to colour map so kernel output can be set.
   }
   update() {
-    for (let y = 0; y < this.qd.height; y++) {
-      for (let x = 0; x < this.qd.width; x++) {
-        let coord = (x + this.qd.width * y) * 4;
-        this.data[coord + 0] = 255;
-        this.data[coord + 1] = 255;
-        this.data[coord + 2] = 255;
-        this.data[coord + 3] = this.colourmap.process(this.qd.get(x,y));
-      }
-    }
-    
+    this.data = this.colourmap.process(this.qd.getReal(), this.qd.getImag()); // Push complex numbers to kernel and get RGBA values back.
     this.colourmap.resetGain();
-    this.#image = new ImageData(this.data, this.width()); // TEMP - EXPLAIN LATER
+    this.#image = new ImageData(this.data, this.width()); // Create new ImageData object using values retrieved from kernel.
   }
   getImage() {
     return this.#image;
