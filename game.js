@@ -113,8 +113,9 @@ class QuantumData {
   width; height; // final int
   #controlstate; // ControlState
 
-  #gpu // To save calling the constructor every time QuantumData.step() is called, a new gpu property is added to the class for future reference.
-  #updateCompontent // Kernel used to update real and imaginary components of simulation in step().
+  #gpu; // To save calling the constructor every time QuantumData.step() is called, a new gpu property is added to the class for future reference.
+  #updateCompontent; // Kernel used to update real and imaginary components of simulation in step().
+  #addGaussComp; // Kernel used to add gaussian to real and imaginary components of simulation in addGaussian().
 
   constructor(width, height, ks) {
     this.#controlstate = ks;
@@ -161,6 +162,29 @@ class QuantumData {
         // Else, return updated value of component.
         return sink_mult[x+w*y] * (update[x+w*y] + sign * delta_t * (-0.5 * (ref[x+w*(y-1)]+ref[x+w*(y+1)]+ref[(x-1)+w*y]+ref[(x+1)+w*y]-4*ref[x+w*y]) + pot_cache[x+w*y]*ref[x+w*y]));
     }).setOutput([this.width * this.height]); // Set output size to be equal to "data" property of FloatArray2d objects.
+    
+    // addGaussComp - Handles adding real and imaginary (two seperate calls) components of a gaussian to the simulation data.
+    // Takes in width of simulation, various pre-computed statistics of gaussian, a phase shift, and the component to be updated.
+    // Phase shift allows elegant toggle between using sin and cos - allowing the same kernel to be reused for both components.
+    // comp = real and phase = pi/2, or comp = imag and phase = 0.
+    this.#addGaussComp = this.#gpu.createKernel(function(width, height, xc, yc, a, d, omegax, omegay, phase, comp) {
+      // Calculate x and y co-ordinates from index in 1D array.
+      const x = this.thread.x % width;
+      const y = Math.floor(this.thread.x / width);
+
+      // If the co-ordinates are on the border they should not be simulated - return 0.
+      if(x < 1 || x >= width - 1 || y < 1 || y >= height - 1) {
+          return 0;
+      }
+
+      // Else, update component.
+      const r2 = (x-xc)*(x-xc)+(y-yc)*(y-yc);
+      const v = a * Math.exp(-r2/d)
+          * Math.sin((omegax*x/width) + phase)
+          * Math.sin((omegay*y/height) + phase);
+      return comp[this.thread.x] + v;
+
+    }).setOutput([this.width * this.height]); // Set output size to be equal to "data" property of FloatArray2d objects.
   }
   #saveInitialState() {
     this.#init_real.setEqualTo(this.#real);
@@ -177,21 +201,11 @@ class QuantumData {
     const d = 4*sigma*sigma;
     const omegax = 2*Math.PI*fx; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
     const omegay = 2*Math.PI*fy; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
-    for(let x=1;x<this.width-1;x++) {
-      for(let y=1;y<this.height-1;y++) {
-        const r2 = (x-xc)*(x-xc)+(y-yc)*(y-yc);
-        const vr = a * Math.exp(-r2/d)
-            * Math.cos(omegax*x/this.width)
-            * Math.cos(omegay*y/this.height);
-        const vi = a * Math.exp(-r2/d)
-            * Math.sin(omegax*x/this.width)
-            * Math.sin(omegay*y/this.height);
-        this.#real.set(x,y,this.#real.get(x,y)+vr);
-        this.#imag.set(x,y,this.#imag.get(x,y)+vi);
-      }
-    }
+    
+    // Run kernels to add Gaussian to real and imaginary components, copying the results into the "data" property of that component's FloatArray2d object.
+    this.#real.setData(this.#addGaussComp(this.width, this.height, xc, yc, a, d, omegax, omegay, Math.PI/2, this.#real.getData()));
+    this.#imag.setData(this.#addGaussComp(this.width, this.height, xc, yc, a, d, omegax, omegay, 0, this.#imag.getData()));
   }
-  get(x, y) {return new Complex(this.#real.get(x,y),this.#imag.get(x,y));}
   #reset_potential_cache() {
     // "potentials >0 are problematic"
     // "pixel wide band with potential +1 above background - tunnelling"
