@@ -62,13 +62,6 @@ async function graphicsLoop() {
 // Can't really figure out how to do final without const, which doesn't work for class properties? If there is some easy way to emulate this, let me know - but I don't think it is actually necessary or even desirable.
 
 // Partial port of class from QuantumData.java in original
-class Complex {
-  #real; #imag; // final float
-  constructor(r = 0, i = 0) {this.#real = r; this.#imag = i;} // Preserving default values of 0 from original.
-  mod2() {return this.#real*this.#real+this.#imag*this.#imag} //NOTE TO SELF: MOD2 STANDS FOR MODULUS SQUARED!!!
-}
-
-// Partial port of class from QuantumData.java in original
 class FloatArray2d {
   #data; // float[]
   #width; // int
@@ -122,10 +115,10 @@ class QuantumData {
     this.#controlstate = ks;
     this.width = width;
     this.height = height;
-    this.#real = new FloatArray2d(width, height);
-    this.#imag = new FloatArray2d(width, height);
-    this.#init_real = new FloatArray2d(width, height);
-    this.#init_imag = new FloatArray2d(width, height);
+    this.#real = new Float32Array(width * height).fill(0); // TEMP
+    this.#imag = new Float32Array(width * height).fill(0); // TEMP
+    this.#init_real = new Float32Array(width * height).fill(0); // TEMP
+    this.#init_imag = new Float32Array(width * height).fill(0); // TEMP
     this.#walls = new BoolArray2d(width, height);
     this.#sink = new BoolArray2d(width, height);
     this.sink_mult = new FloatArray2d(width, height);
@@ -134,10 +127,10 @@ class QuantumData {
     this.#setupKernels(); // Kernels are several lines long, so in my opinion having them stored seperately makes code more readable.
   }
   getReal() {
-    return this.#real.getData();
+    return this.#real;
   }
   getImag() {
-    return this.#imag.getData();
+    return this.#imag;
   }
   #setupKernels() {
     this.#gpu = new GPU.GPU(); // Create GPU object.
@@ -210,12 +203,12 @@ class QuantumData {
     }).setOutput([this.width * this.height]); // Set output size to be equal to "data" property of FloatArray2d objects.
   }
   #saveInitialState() {
-    this.#init_real.setEqualTo(this.#real);
-    this.#init_imag.setEqualTo(this.#imag);
+    this.#init_real = [...this.#real];
+    this.#init_imag = [...this.#imag];
   }
   resetInitialState() {
-    this.#real.setEqualTo(this.#init_real);
-    this.#imag.setEqualTo(this.#init_imag);
+    this.#real = [...this.#init_real];
+    this.#imag = [...this.#init_imag];
   }
   setDeltaT(dt) {this.#delta_t = dt;}
   setMaxTilt(mt) {this.#maxtilt = mt;}
@@ -226,8 +219,8 @@ class QuantumData {
     const omegay = 2*Math.PI*fy; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
 
     // Run kernels to add Gaussian to real and imaginary components, copying the results into the "data" property of that component's FloatArray2d object.
-    this.#real.setData(this.#addGaussComp(this.width, this.height, xc, yc, a, d, omegax, omegay, Math.PI/2, this.#real.getData()));
-    this.#imag.setData(this.#addGaussComp(this.width, this.height, xc, yc, a, d, omegax, omegay, 0, this.#imag.getData()));
+    this.#real = this.#addGaussComp(this.width, this.height, xc, yc, a, d, omegax, omegay, Math.PI/2, this.#real);
+    this.#imag = this.#addGaussComp(this.width, this.height, xc, yc, a, d, omegax, omegay, 0, this.#imag);
   }
   #reset_potential_cache() {
     // "potentials >0 are problematic"
@@ -286,8 +279,8 @@ class QuantumData {
   }
   #add_walls() {
     // Run kernels to add set real and imaginary components to 0 if a wall is present.
-    this.#real.setData(this.#addWallsComp(this.width, this.height, this.#walls.getData(), this.#real.getData()));
-    this.#imag.setData(this.#addWallsComp(this.width, this.height, this.#walls.getData(), this.#imag.getData()));
+    this.#real = this.#addWallsComp(this.width, this.height, this.#walls.getData(), this.#real);
+    this.#imag = this.#addWallsComp(this.width, this.height, this.#walls.getData(), this.#imag);
   }
   step() {
     if(!this.running) {
@@ -301,8 +294,8 @@ class QuantumData {
     this.#reset_potential_cache();
 
     // Run kernels to update real and imaginary components, copying the results into the "data" property of that component's FloatArray2d object.
-    this.#real.setData(this.#updateCompontent(this.width, this.height, this.#delta_t, this.#real.getData(), this.#imag.getData(), this.#walls.getData(), this.sink_mult.getData(), this.#pot_cache.getData(), 1));
-    this.#imag.setData(this.#updateCompontent(this.width, this.height, this.#delta_t, this.#imag.getData(), this.#real.getData(), this.#walls.getData(), this.sink_mult.getData(), this.#pot_cache.getData(), -1)); 
+    this.#real = this.#updateCompontent(this.width, this.height, this.#delta_t, this.#real, this.#imag, this.#walls.getData(), this.sink_mult.getData(), this.#pot_cache.getData(), 1);
+    this.#imag = this.#updateCompontent(this.width, this.height, this.#delta_t, this.#imag, this.#real, this.#walls.getData(), this.sink_mult.getData(), this.#pot_cache.getData(), -1); 
 
   }
   #setupSinkMult() {
