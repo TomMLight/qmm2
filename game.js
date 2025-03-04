@@ -126,6 +126,9 @@ class QuantumData {
     this.#pot_cache = new FloatArray2d(width, height);
     this.#setupKernels(); // Kernels are several lines long, so in my opinion having them stored seperately makes code more readable.
   }
+  getGPU() {
+    return this.#gpu;
+  }
   getReal() {
     return this.#real;
   }
@@ -155,7 +158,7 @@ class QuantumData {
     
         // Else, return updated value of component.
         return sink_mult[x+w*y] * (update[x+w*y] + sign * delta_t * (-0.5 * (ref[x+w*(y-1)]+ref[x+w*(y+1)]+ref[(x-1)+w*y]+ref[(x+1)+w*y]-4*ref[x+w*y]) + pot_cache[x+w*y]*ref[x+w*y]));
-    }).setOutput([this.width * this.height]); // Set output size to be equal to "data" property of FloatArray2d objects.
+    }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true); // Set output size to be equal to "data" property of FloatArray2d objects.
     
     // addGaussComp - Handles adding real and imaginary components (two seperate calls) of a gaussian to the simulation data.
     // Takes in width and height of simulation, various pre-computed statistics of gaussian, a phase shift, and the component to be updated.
@@ -203,12 +206,12 @@ class QuantumData {
     }).setOutput([this.width * this.height]); // Set output size to be equal to "data" property of FloatArray2d objects.
   }
   #saveInitialState() {
-    this.#init_real = [...this.#real];
-    this.#init_imag = [...this.#imag];
+    this.#init_real = this.#real;
+    this.#init_imag = this.#imag;
   }
   resetInitialState() {
-    this.#real = [...this.#init_real];
-    this.#imag = [...this.#init_imag];
+    this.#real = this.#init_real;
+    this.#imag = this.#init_imag;
   }
   setDeltaT(dt) {this.#delta_t = dt;}
   setMaxTilt(mt) {this.#maxtilt = mt;}
@@ -358,21 +361,21 @@ class AmpColourMap {
   // Similarly, kernels are defined once and saved for future use.
   #mod2;
   #renderFrame;
-  constructor(size) {
+  constructor(size, gpu) {
     this.#lookup = new Int32Array(this.#maxindex + 1); //Int32Array closest to int[] in Java.
     for (let i=0;i<this.#maxindex+1;i++) {
       this.#lookup[i] = Math.trunc(255*Math.pow(i/this.#maxindex,this.#gamma)) //Math.trunc() closest to how casting to int works in Java.
     }
-    this.#setupGPU(size);
+    this.#setupGPU(size, gpu);
   }
-  #setupGPU(size) {
-    this.#gpu = new GPU.GPU(); // Create GPU object.
+  #setupGPU(size, gpu) {
+    this.#gpu = gpu; // Create GPU object.
     
     // Next, create kernels:
     // mod2() - Takes in array of complex numbers (one array for each component), and returns the modulus squared of each complex number.
     this.#mod2 = this.#gpu.createKernel(function(real, imag) {
       return real[this.thread.x] * real[this.thread.x] + imag[this.thread.x] * imag[this.thread.x];
-    }).setOutput([size]);  // One value for each cell.
+    }).setOutput([size]).setPipeline(true);  // One value for each cell.
 
     // renderFrame() - Takes in arrays of source strengths, a gain value, an alpha value lookup array, and a max index for that array.
     // Returns an array of RGBA values for the sources.
@@ -392,7 +395,7 @@ class AmpColourMap {
   }
   process(real, imag) {
     const source = this.#mod2(real, imag); // Call mod2 on values to get source strengths.
-    this.#max = Math.max(...source); // Grab max source strength. THIS WILL BE INEFFICIENT WITH TEXTURES, REWRITE?!
+    this.#max = Math.max(...source.toArray()); // Grab max source strength. THIS WILL BE INEFFICIENT WITH TEXTURES, REWRITE?!
     return Uint8ClampedArray.from(this.#renderFrame(source, this.#gain, this.#maxindex, this.#lookup)); // Render and return frame.
   }
   resetGain() {
@@ -413,7 +416,7 @@ class GameRender {
     this.qd = source;
     this.#image = new ImageData(new Uint8ClampedArray(this.width() * this.height() * 4), this.width()); // ImageData replaced BufferedImage
     this.data = new Uint8ClampedArray(this.width() * this.height() * 4); // Stores RGBA values used to create ImageData.
-    this.colourmap = new AmpColourMap(this.width() * this.height()); // Supply size of array to colour map so kernel output can be set.
+    this.colourmap = new AmpColourMap(this.width() * this.height(), this.qd.getGPU()); // Supply size of array to colour map so kernel output can be set.
   }
   update() {
     this.data = this.colourmap.process(this.qd.getReal(), this.qd.getImag()); // Push complex numbers to kernel and get RGBA values back.
