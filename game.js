@@ -34,7 +34,10 @@ async function graphicsLoop() {
   while(true) {
     quantumframes_this_frame++;
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
+      const qFrameStart = nanoTime();
       manager.getQD().step();
+      totalQFrames++;
+      console.log(totalQFrames + " " + (nanoTime() - qFrameStart));
     } else {
       const timesincelastframe = nanoTime() - lastframetime;
       const sleeptime = gfxframetime - timesincelastframe;
@@ -62,6 +65,13 @@ async function graphicsLoop() {
 // Can't really figure out how to do final without const, which doesn't work for class properties? If there is some easy way to emulate this, let me know - but I don't think it is actually necessary or even desirable.
 
 // Partial port of class from QuantumData.java in original
+class Complex {
+  #real; #imag; // final float
+  constructor(r = 0, i = 0) {this.#real = r; this.#imag = i;} // Preserving default values of 0 from original.
+  mod2() {return this.#real*this.#real+this.#imag*this.#imag} //NOTE TO SELF: MOD2 STANDS FOR MODULUS SQUARED!!!
+}
+
+// Partial port of class from QuantumData.java in original
 class FloatArray2d {
   #data; // float[]
   #width; // int
@@ -77,7 +87,6 @@ class FloatArray2d {
   set(x, y, v) {this.#data[x+this.#width*y]=v;}
   getWidth() {return this.#width;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
   getData() {return this.#data;} // Necessary as in JavaScript private properties cannot be read even by other objects of same class, unlike Java.
-  setData(v) {this.#data = v;} // Used to copy results of kernel into array. Maybe temp if I use textures?
 }
 
 // Partial port of class from QuantumData.java in original
@@ -91,7 +100,6 @@ class BoolArray2d {
   width() {return this.#width;}
   get(x,y) {return this.#data[x+this.#width*y];}
   set(x,y,v) {this.#data[x+this.#width*y]=v;}
-  getData() {return this.#data;} // Need to grab entirety of data to load into GPU.
 }
 
 // Partial port of class from QuantumData.java in original
@@ -106,112 +114,27 @@ class QuantumData {
   width; height; // final int
   #controlstate; // ControlState
 
-  #gpu; // To save calling the constructor every time QuantumData.step() is called, a new gpu property is added to the class for future reference.
-  #updateCompontent; // Kernel used to update real and imaginary components of simulation in step().
-  #addGaussComp; // Kernel used to add gaussian to real and imaginary components of simulation in addGaussian().
-  #addWallsComp; // Kernel used to set real and imaginary components of simulation to 0 when a wall is present.
-
   constructor(width, height, ks) {
     this.#controlstate = ks;
     this.width = width;
     this.height = height;
-    this.#real = new Float32Array(width * height).fill(0); // TEMP
-    this.#imag = new Float32Array(width * height).fill(0); // TEMP
-    this.#init_real = new Float32Array(width * height).fill(0); // TEMP
-    this.#init_imag = new Float32Array(width * height).fill(0); // TEMP
+    this.#real = new FloatArray2d(width, height);
+    this.#imag = new FloatArray2d(width, height);
+    this.#init_real = new FloatArray2d(width, height);
+    this.#init_imag = new FloatArray2d(width, height);
     this.#walls = new BoolArray2d(width, height);
     this.#sink = new BoolArray2d(width, height);
     this.sink_mult = new FloatArray2d(width, height);
     this.#levelDesignPotential = new FloatArray2d(width, height);
     this.#pot_cache = new FloatArray2d(width, height);
-    this.#setupKernels(); // Kernels are several lines long, so in my opinion having them stored seperately makes code more readable.
-  }
-  getGPU() {
-    return this.#gpu;
-  }
-  getReal() {
-    return this.#real;
-  }
-  getImag() {
-    return this.#imag;
-  }
-  #setupKernels() {
-    this.#gpu = new GPU.GPU(); // Create GPU object.
-
-    // Next, define kernels:
-    
-    // updateComponent - Handles updating real and imaginary (two seperate calls) components of simulation in step().
-    // Takes in various properties of QuantumData, with FloatArray2d objects being passed as their raw 1D "data" property.
-    // Returns a 1D array that can then be copied into the "data" property of that component's FloatArray2d object.
-    // "update" and "ref" are the component being updated and merely referenced respectively.
-    // "sign" allows a toggle between addition and subtraction so kernel can be reused for both real and imaginary component updates.
-    // Simply flip which component is "update" vs "ref" and "sign" from 1 to -1.
-    this.#updateCompontent = this.#gpu.createKernel(function(w, h, delta_t, update, ref, walls, sink_mult, pot_cache, sign) {
-        // Calculate x and y co-ordinates from index in 1D array.
-        const x = this.thread.x % w;
-        const y = Math.floor(this.thread.x / w);
-    
-        // If the co-ordinates are on the border or inside a wall they should not be simulated - return 0.
-        if(x < 1 || x >= w - 1 || y < 1 || y >= h - 1 || walls[x+w*y] == 1) {
-            return 0;
-        }
-    
-        // Else, return updated value of component.
-        return sink_mult[x+w*y] * (update[x+w*y] + sign * delta_t * (-0.5 * (ref[x+w*(y-1)]+ref[x+w*(y+1)]+ref[(x-1)+w*y]+ref[(x+1)+w*y]-4*ref[x+w*y]) + pot_cache[x+w*y]*ref[x+w*y]));
-    }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true); // Set output size to be equal to "data" property of FloatArray2d objects.
-    
-    // addGaussComp - Handles adding real and imaginary components (two seperate calls) of a gaussian to the simulation data.
-    // Takes in width and height of simulation, various pre-computed statistics of gaussian, a phase shift, and the component to be updated.
-    // Phase shift allows elegant toggle between using sin and cos - allowing the same kernel to be reused for both components.
-    // comp = real and phase = pi/2, or comp = imag and phase = 0.
-    this.#addGaussComp = this.#gpu.createKernel(function(width, height, xc, yc, a, d, omegax, omegay, phase, comp) {
-      // Calculate x and y co-ordinates from index in 1D array.
-      const x = this.thread.x % width;
-      const y = Math.floor(this.thread.x / width);
-
-      // If the co-ordinates are on the border they should not be simulated - return 0.
-      if(x < 1 || x >= width - 1 || y < 1 || y >= height - 1) {
-          return 0;
-      }
-
-      // Else, update component.
-      const r2 = (x-xc)*(x-xc)+(y-yc)*(y-yc);
-      const v = a * Math.exp(-r2/d)
-          * Math.sin((omegax*x/width) + phase)
-          * Math.sin((omegay*y/height) + phase);
-      return comp[this.thread.x] + v;
-
-    }).setOutput([this.width * this.height]); // Set output size to be equal to "data" property of FloatArray2d objects.
-
-    // addWallsComp - Handles setting real and imaginary components (two seperate calls) of simulation to 0 when a wall is present in that cell.
-    // Takes in width and height of simulation, an array of walls, and the component to be updated.
-    // To update both components, simply call the function twice, supplying comp as real component and then imaginary component.
-    this.#addWallsComp = this.#gpu.createKernel(function(width, height, walls, comp) {
-      // Calculate x and y co-ordinates from index in 1D array.
-      const x = this.thread.x % width;
-      const y = Math.floor(this.thread.x / width);
-
-      // MAY BE UNECESSARY?
-      // If the co-ordinates are on the border they should not be simulated - return 0.
-      if(x < 1 || x >= width - 1 || y < 1 || y >= height - 1) {
-          return 0;
-      }
-
-      // Else check for presence of walls:
-      if(walls[this.thread.x] == 1) {
-        return 0
-      }
-      return comp[this.thread.x]; // No walls, return existing value.
-
-    }).setOutput([this.width * this.height]); // Set output size to be equal to "data" property of FloatArray2d objects.
   }
   #saveInitialState() {
-    this.#init_real = this.#real;
-    this.#init_imag = this.#imag;
+    this.#init_real.setEqualTo(this.#real);
+    this.#init_imag.setEqualTo(this.#imag);
   }
   resetInitialState() {
-    this.#real = this.#init_real;
-    this.#imag = this.#init_imag;
+    this.#real.setEqualTo(this.#init_real);
+    this.#imag.setEqualTo(this.#init_imag);
   }
   setDeltaT(dt) {this.#delta_t = dt;}
   setMaxTilt(mt) {this.#maxtilt = mt;}
@@ -220,11 +143,21 @@ class QuantumData {
     const d = 4*sigma*sigma;
     const omegax = 2*Math.PI*fx; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
     const omegay = 2*Math.PI*fy; // "fixme this seems wrong" (Crispin has confirmed since this is not the case)
-
-    // Run kernels to add Gaussian to real and imaginary components, copying the results into the "data" property of that component's FloatArray2d object.
-    this.#real = this.#addGaussComp(this.width, this.height, xc, yc, a, d, omegax, omegay, Math.PI/2, this.#real);
-    this.#imag = this.#addGaussComp(this.width, this.height, xc, yc, a, d, omegax, omegay, 0, this.#imag);
+    for(let x=1;x<this.width-1;x++) {
+      for(let y=1;y<this.height-1;y++) {
+        const r2 = (x-xc)*(x-xc)+(y-yc)*(y-yc);
+        const vr = a * Math.exp(-r2/d)
+            * Math.cos(omegax*x/this.width)
+            * Math.cos(omegay*y/this.height);
+        const vi = a * Math.exp(-r2/d)
+            * Math.sin(omegax*x/this.width)
+            * Math.sin(omegay*y/this.height);
+        this.#real.set(x,y,this.#real.get(x,y)+vr);
+        this.#imag.set(x,y,this.#imag.get(x,y)+vi);
+      }
+    }
   }
+  get(x, y) {return new Complex(this.#real.get(x,y),this.#imag.get(x,y));}
   #reset_potential_cache() {
     // "potentials >0 are problematic"
     // "pixel wide band with potential +1 above background - tunnelling"
@@ -281,9 +214,14 @@ class QuantumData {
     }
   }
   #add_walls() {
-    // Run kernels to add set real and imaginary components to 0 if a wall is present.
-    this.#real = this.#addWallsComp(this.width, this.height, this.#walls.getData(), this.#real);
-    this.#imag = this.#addWallsComp(this.width, this.height, this.#walls.getData(), this.#imag);
+    for(let x=1;x<this.width-1;x++) {
+      for(let y=1;y<this.height-1;y++) {
+        if(this.#walls.get(x,y)) {
+          this.#real.set(x,y,0);
+          this.#imag.set(x,y,0);
+        }
+      }      
+    }
   }
   step() {
     if(!this.running) {
@@ -295,11 +233,32 @@ class QuantumData {
     }
     this.#controlstate.step();
     this.#reset_potential_cache();
-
-    // Run kernels to update real and imaginary components, copying the results into the "data" property of that component's FloatArray2d object.
-    this.#real = this.#updateCompontent(this.width, this.height, this.#delta_t, this.#real, this.#imag, this.#walls.getData(), this.sink_mult.getData(), this.#pot_cache.getData(), 1);
-    this.#imag = this.#updateCompontent(this.width, this.height, this.#delta_t, this.#imag, this.#real, this.#walls.getData(), this.sink_mult.getData(), this.#pot_cache.getData(), -1); 
-
+    // "boundaries are never computed, hence left at 0"
+    for(let y=1;y<this.height-1;y++) {
+      for(let x=1;x<this.width-1;x++) {
+        if(!this.#walls.get(x,y)) { //Real component "fixed" at last!!!
+          this.#real.set(x,y,
+            this.sink_mult.get(x,y)*
+          (this.#real.get(x,y) + this.#delta_t * (-0.5 *
+            (this.#imag.get(x,y-1)+this.#imag.get(x,y+1)+this.#imag.get(x-1,y)+this.#imag.get(x+1,y)-4*this.#imag.get(x,y))
+          + this.#pot_cache.get(x,y)*this.#imag.get(x,y))));
+        }
+      }      
+    }
+    // "I have inlined del2, it does make it faster"
+		// "Inlining could happen automatically with vm options -XX:FreqInlineSize=50 -XX:MaxInlineSize=50"
+		// "But these are not universally supported or guaranteed not to change in future"
+    for(let y=1;y<this.height-1;y++) {
+      for(let x=1;x<this.width-1;x++) {
+        if(!this.#walls.get(x,y)) { // The following calculation is EXACTLY equivalent to original after removing: whitespace, "this." from properties, "#" for private properties, and an "f" in the Java to denote a float.
+          this.#imag.set(x,y,
+              this.sink_mult.get(x,y)*
+            (this.#imag.get(x,y) - this.#delta_t * (-0.5 *
+              (this.#real.get(x,y-1)+this.#real.get(x,y+1)+this.#real.get(x-1,y)+this.#real.get(x+1,y)-4*this.#real.get(x,y))
+            + this.#pot_cache.get(x,y)*this.#real.get(x,y))));
+        }
+      }      
+    }
   }
   #setupSinkMult() {
 		// "flood fill sink_mult with 0 where not a sink; otherwise distance in pixels from non-sink"
@@ -341,9 +300,13 @@ class QuantumData {
       }      
     }
   }
-  // Slightly hacky work around to get control state from main function in order to bind event listener.
+  // VERY temp
   getCS() {
     return this.#controlstate;
+  }
+  // ALSO VERY temp
+  getWall(x, y) {
+    return this.#walls.get(x, y);
   }
 }
 
@@ -356,47 +319,22 @@ class AmpColourMap {
   #lookup; // int[]
   #max = 0; // float
   #gain = 0; // float
-
-  #gpu; // To save calling the constructor every time process() is called, a new gpu property is added to the class for future reference.
-  // Similarly, kernels are defined once and saved for future use.
-  #mod2;
-  #renderFrame;
-  constructor(size, gpu) {
+  constructor() {
     this.#lookup = new Int32Array(this.#maxindex + 1); //Int32Array closest to int[] in Java.
     for (let i=0;i<this.#maxindex+1;i++) {
       this.#lookup[i] = Math.trunc(255*Math.pow(i/this.#maxindex,this.#gamma)) //Math.trunc() closest to how casting to int works in Java.
     }
-    this.#setupGPU(size, gpu);
   }
-  #setupGPU(size, gpu) {
-    this.#gpu = gpu; // Create GPU object.
-    
-    // Next, create kernels:
-    // mod2() - Takes in array of complex numbers (one array for each component), and returns the modulus squared of each complex number.
-    this.#mod2 = this.#gpu.createKernel(function(real, imag) {
-      return real[this.thread.x] * real[this.thread.x] + imag[this.thread.x] * imag[this.thread.x];
-    }).setOutput([size]).setPipeline(true);  // One value for each cell.
-
-    // renderFrame() - Takes in arrays of source strengths, a gain value, an alpha value lookup array, and a max index for that array.
-    // Returns an array of RGBA values for the sources.
-    this.#renderFrame = this.#gpu.createKernel(function(source, gain, maxindex, lookup) {
-      // R, G, and B values should all be 255 - only every 4th value (Alpha) needs to be calculated.
-      if(this.thread.x % 4 != 3) {
-        return 255;
-      }
-
-      // Calculate relative co-ordinate for non-RGBA array.
-      const pos = Math.floor(this.thread.x / 4);
-
-      // Calculate index, cap at "maxIndex", then return corresponding value in "lookup".
-      const index = (Math.min(Math.trunc(source[pos] * gain), maxindex));
-      return lookup[index];
-    }).setOutput([size * 4]); // RGBA channel for each cell = number of cells * 4 channels.
-  }
-  process(real, imag) {
-    const source = this.#mod2(real, imag); // Call mod2 on values to get source strengths.
-    this.#max = Math.max(...source.toArray()); // Grab max source strength. THIS WILL BE INEFFICIENT WITH TEXTURES, REWRITE?!
-    return Uint8ClampedArray.from(this.#renderFrame(source, this.#gain, this.#maxindex, this.#lookup)); // Render and return frame.
+  process(c) {
+    const source = c.mod2();
+    if (source>this.#max) this.#max = source;
+    let index = Math.trunc(source*this.#gain);
+    if (index>this.#maxindex) index=this.#maxindex;
+    const alpha = this.#lookup[index];
+    const red = 255;
+    const green = 255;
+    const blue = 255;
+    return[red, green, blue, alpha]; // In original bit shifting is done here to pack all 4 values into one int. In the original this is a requirement due to how setRGB, but this version has no such constraints. So, I've just returned it as a length 4 array to make my life easier. If this proves to break later I will change it.
   }
   resetGain() {
     this.#gain = this.#maxindex / this.#max;
@@ -410,18 +348,30 @@ class GameRender {
   qd; // QuantumData
   colourmap; // AmpColourMap (for now)
   #image; // ImageData
-  width() {return this.qd.width;}
-  height() {return this.qd.height;}
+  width() {return Math.trunc(this.qd.width);}
+  height() {return Math.trunc(this.qd.height);}
   constructor(source) {
     this.qd = source;
-    this.#image = new ImageData(new Uint8ClampedArray(this.width() * this.height() * 4), this.width()); // ImageData replaced BufferedImage
-    this.data = new Uint8ClampedArray(this.width() * this.height() * 4); // Stores RGBA values used to create ImageData.
-    this.colourmap = new AmpColourMap(this.width() * this.height(), this.qd.getGPU()); // Supply size of array to colour map so kernel output can be set.
+    this.#image = new ImageData(new Uint8ClampedArray(this.width() * this.height() * 4), this.width()); //ImageData replaced BufferedImage
+    this.data = new Array(this.width()*this.height()); // To avoid bit-shifting back and forth data is a 2D array instead of a 1D array of RGBA values packed into a single int. May attempt bit shifting later to quadruple check this isn't causing issues.
+    this.colourmap = new AmpColourMap();
   }
   update() {
-    this.data = this.colourmap.process(this.qd.getReal(), this.qd.getImag()); // Push complex numbers to kernel and get RGBA values back.
+    const showpotential = false; // "for debugging"
+    // "it may seem perverse to calculate 'data' only to copy it into 'image'"
+    // "rather than just calculate image.  but i profiled and it's faster."
+    for (let y = 0; y < this.qd.height; y++) {
+      for (let x = 0; x < this.qd.width; x++) {
+        const point = showpotential ? new Complex(0, 0) : this.qd.get(x,y) // No level potentials present at the moment, so imaginary component always 0.
+        this.data[x + this.qd.width * y] = this.colourmap.process(point);
+        if(this.qd.getWall(x, y)) {
+          this.data[x + this.qd.width * y] = [100, 100, 100, 255]; // Shade walls in uniform grey. Functionality ok but feels very hacky maybe fix later.
+        }
+      }
+    }
+    
     this.colourmap.resetGain();
-    this.#image = new ImageData(this.data, this.width()); // Create new ImageData object using values retrieved from kernel.
+    this.#image = setRGB(0, 0, this.width(), this.height(), this.data, 0, this.width()); // In the original this is a method that updates the RGB values of 'image'. As imageData cannot be edited once created in JavaScript, this instead returns an ImageData object which replaces the existing one.
   }
   getImage() {
     return this.#image;
@@ -672,5 +622,6 @@ const gfxframetime = 33000000; // "30 fps"
 const quantum_frames_per_gfx_frame = gfxframetime / manager.quantumFrameTimeNanos();
 let lastframetime = nanoTime();
 let quantumframes_this_frame = 0;
+let totalQFrames = 0;
 
 requestAnimationFrame(graphicsLoop); // Start recursive calling of requestAnimationFrame, using graphicsLoop() as the function.
