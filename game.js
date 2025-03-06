@@ -35,9 +35,9 @@ async function graphicsLoop() {
     quantumframes_this_frame++;
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
       totalQFrames++;
-      //console.time(totalQFrames);
+      console.time("qFrame " + totalQFrames);
       manager.getQD().step();
-      //console.timeEnd(totalQFrames);
+      console.timeEnd("qFrame " + totalQFrames);
     } else {
       const timesincelastframe = nanoTime() - lastframetime;
       const sleeptime = gfxframetime - timesincelastframe;
@@ -50,9 +50,9 @@ async function graphicsLoop() {
       quantumframes_this_frame = 0;
       lastframetime = currenttime;
       totalGfxFrames++;
-      console.time(totalGfxFrames);
+      //console.time("gfxFrame " + totalGfxFrames);
       manager.updateGraphics();
-      console.timeEnd(totalGfxFrames);
+      //console.timeEnd("gfxFrame " + totalGfxFrames);
       break; // New graphics frame needed, exit the loop and request new frame.
     }
   }
@@ -89,6 +89,7 @@ class QuantumData {
   #gpu;
   #stepComponent;
   #toTexture;
+  #resetPotentialCacheKernel;
 
   constructor(width, height, ks) {
     this.#controlstate = ks;
@@ -129,6 +130,20 @@ class QuantumData {
 
     this.#toTexture = this.#gpu.createKernel(function(values){
       return values[this.thread.x];
+    }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true);
+
+    this.#resetPotentialCacheKernel = this.#gpu.createKernel(function(w, h, newtopleft, x_pot_step, y_pot_step, levelDesignPotential) {
+      // Calculate x and y co-ordinates from index in 1D array.
+      const x = this.thread.x % w;
+      const y = Math.floor(this.thread.x / w);
+
+      // If the co-ordinates are on the border they should not be simulated - return 0.
+      if(x < 1 || x >= w - 1 || y < 1 || y >= h - 1) {
+          return 0;
+      }
+
+      // Else calculate now potential.
+      return newtopleft + (x_pot_step * x) + (y_pot_step * y) + levelDesignPotential[x+w*y];
     }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true);
   }
   #saveInitialState() {
@@ -190,15 +205,8 @@ class QuantumData {
     // "compute per-simulation-element steps in potential to efficiently compute"
     const x_pot_step = right_change/this.width;
     const y_pot_step = bottom_change/this.width;
-    let left_edge_pot = newtopleft;
-    for(let y=1;y<this.height-1;y++) {
-      left_edge_pot += y_pot_step;
-      let current_pot = left_edge_pot;
-      for(let x=1;x<this.width-1;x++) {
-        current_pot += x_pot_step;
-        this.#pot_cache[x+this.width*y] = current_pot + this.#levelDesignPotential[x+this.width*y];
-      }
-    }
+
+    this.#pot_cache = this.#resetPotentialCacheKernel(this.width, this.height, newtopleft, x_pot_step, y_pot_step, this.#levelDesignPotential);
   }
   #ensure_no_positive_potential() {
     let maxpot = Number.NEGATIVE_INFINITY;
