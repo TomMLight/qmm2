@@ -87,7 +87,8 @@ class QuantumData {
   #controlstate; // ControlState
 
   #gpu;
-  #exampleKernel;
+  #stepComponent;
+  #toTexture;
 
   constructor(width, height, ks) {
     this.#controlstate = ks;
@@ -105,16 +106,38 @@ class QuantumData {
     this.#gpu = new GPU.GPU();
     this.#setupKernels();
   }
+  getReal() {
+    return this.#real.toArray();
+  }
+  getImag() {
+    return this.#imag.toArray();
+  }
   #setupKernels() {
-    this.#exampleKernel = this.#gpu.createKernel(function() {}).setOutput([this.width * this.height]);
+    this.#stepComponent = this.#gpu.createKernel(function(w, h, delta_t, update, ref, walls, sink_mult, pot_cache, sign) {
+      // Calculate x and y co-ordinates from index in 1D array.
+      const x = this.thread.x % w;
+      const y = Math.floor(this.thread.x / w);
+  
+      // If the co-ordinates are on the border or inside a wall they should not be simulated - return 0.
+      if(x < 1 || x >= w - 1 || y < 1 || y >= h - 1 || walls[x+w*y] == 1) {
+          return 0;
+      }
+  
+      // Else, return updated value of component.
+      return sink_mult[x+w*y] * (update[x+w*y] + sign * delta_t * (-0.5 * (ref[x+w*(y-1)]+ref[x+w*(y+1)]+ref[(x-1)+w*y]+ref[(x+1)+w*y]-4*ref[x+w*y]) + pot_cache[x+w*y]*ref[x+w*y]));
+    }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true);
+
+    this.#toTexture = this.#gpu.createKernel(function(values){
+      return values[this.thread.x];
+    }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true);
   }
   #saveInitialState() {
-    this.#init_real = [...this.#real];
-    this.#init_imag = [...this.#imag];
+    this.#init_real = this.#real;
+    this.#init_imag = this.#imag;
   }
   resetInitialState() {
-    this.#real = [...this.#init_real];
-    this.#imag = [...this.#init_imag];
+    this.#real = this.#toTexture(this.#init_real);
+    this.#imag = this.#toTexture(this.#init_imag);
   }
   setDeltaT(dt) {this.#delta_t = dt;}
   setMaxTilt(mt) {this.#maxtilt = mt;}
@@ -137,7 +160,6 @@ class QuantumData {
       }
     }
   }
-  get(x, y) {return new Complex(this.#real[x+this.width*y],this.#imag[x+this.width*y]);}
   #reset_potential_cache() {
     // "potentials >0 are problematic"
     // "pixel wide band with potential +1 above background - tunnelling"
@@ -213,32 +235,9 @@ class QuantumData {
     }
     this.#controlstate.step();
     this.#reset_potential_cache();
-    // "boundaries are never computed, hence left at 0"
-    for(let y=1;y<this.height-1;y++) {
-      for(let x=1;x<this.width-1;x++) {
-        if(!this.#walls[x+this.width*y]) { //Real component "fixed" at last!!!
-          this.#real[x+this.width*y] = 
-            this.sink_mult[x+this.width*y]*
-          (this.#real[x+this.width*y] + this.#delta_t * (-0.5 *
-            (this.#imag[x+this.width*(y-1)]+this.#imag[x+this.width*(y+1)]+this.#imag[(x-1)+this.width*y]+this.#imag[(x+1)+this.width*y]-4*this.#imag[x+this.width*y])
-          + this.#pot_cache[x+this.width*y]*this.#imag[x+this.width*y]));
-        }
-      }      
-    }
-    // "I have inlined del2, it does make it faster"
-		// "Inlining could happen automatically with vm options -XX:FreqInlineSize=50 -XX:MaxInlineSize=50"
-		// "But these are not universally supported or guaranteed not to change in future"
-    for(let y=1;y<this.height-1;y++) {
-      for(let x=1;x<this.width-1;x++) {
-        if(!this.#walls[x+this.width*y]) { // The following calculation is EXACTLY equivalent to original after removing: whitespace, "this." from properties, "#" for private properties, and an "f" in the Java to denote a float.
-          this.#imag[x+this.width*y] = 
-              this.sink_mult[x+this.width*y]*
-            (this.#imag[x+this.width*y] - this.#delta_t * (-0.5 *
-              (this.#real[x+this.width*(y-1)]+this.#real[x+this.width*(y+1)]+this.#real[(x-1)+this.width*y]+this.#real[(x+1)+this.width*y]-4*this.#real[x+this.width*y])
-            + this.#pot_cache[x+this.width*y]*this.#real[x+this.width*y]));
-        }
-      }      
-    }
+
+    this.#real = this.#stepComponent(this.width, this.height, this.#delta_t, this.#real, this.#imag, this.#walls, this.sink_mult, this.#pot_cache, 1);
+    this.#imag = this.#stepComponent(this.width, this.height, this.#delta_t, this.#imag, this.#real, this.#walls, this.sink_mult, this.#pot_cache, -1);
   }
   #setupSinkMult() {
 		// "flood fill sink_mult with 0 where not a sink; otherwise distance in pixels from non-sink"
@@ -337,12 +336,13 @@ class GameRender {
     this.colourmap = new AmpColourMap();
   }
   update() {
-    const showpotential = false; // "for debugging"
     // "it may seem perverse to calculate 'data' only to copy it into 'image'"
     // "rather than just calculate image.  but i profiled and it's faster."
+    const realArray = this.qd.getReal();
+    const imagArray = this.qd.getImag();
     for (let y = 0; y < this.qd.height; y++) {
       for (let x = 0; x < this.qd.width; x++) {
-        const point = showpotential ? new Complex(0, 0) : this.qd.get(x,y) // No level potentials present at the moment, so imaginary component always 0.
+        const point = new Complex(realArray[x+this.width()*y], imagArray[x+this.width()*y]);
         this.data[x + this.qd.width * y] = this.colourmap.process(point);
         if(this.qd.getWall(x, y)) {
           this.data[x + this.qd.width * y] = [100, 100, 100, 255]; // Shade walls in uniform grey. Functionality ok but feels very hacky maybe fix later.
