@@ -35,9 +35,9 @@ async function graphicsLoop() {
     quantumframes_this_frame++;
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
       totalQFrames++;
-      console.time(totalQFrames);
+      //console.time(totalQFrames);
       manager.getQD().step();
-      console.timeEnd(totalQFrames);
+      //console.timeEnd(totalQFrames);
     } else {
       const timesincelastframe = nanoTime() - lastframetime;
       const sleeptime = gfxframetime - timesincelastframe;
@@ -49,7 +49,10 @@ async function graphicsLoop() {
     if(currenttime - lastframetime > gfxframetime) { //"30fps"
       quantumframes_this_frame = 0;
       lastframetime = currenttime;
+      totalGfxFrames++;
+      console.time(totalGfxFrames);
       manager.updateGraphics();
+      console.timeEnd(totalGfxFrames);
       break; // New graphics frame needed, exit the loop and request new frame.
     }
   }
@@ -623,5 +626,6 @@ const quantum_frames_per_gfx_frame = gfxframetime / manager.quantumFrameTimeNano
 let lastframetime = nanoTime();
 let quantumframes_this_frame = 0;
 let totalQFrames = 0;
+let totalGfxFrames = 0;
 
 requestAnimationFrame(graphicsLoop); // Start recursive calling of requestAnimationFrame, using graphicsLoop() as the function.
