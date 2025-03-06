@@ -34,10 +34,10 @@ async function graphicsLoop() {
   while(true) {
     quantumframes_this_frame++;
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
-      const qFrameStart = nanoTime();
-      manager.getQD().step();
       totalQFrames++;
-      console.log(totalQFrames + " " + (nanoTime() - qFrameStart));
+      console.time(totalQFrames);
+      manager.getQD().step();
+      console.timeEnd(totalQFrames);
     } else {
       const timesincelastframe = nanoTime() - lastframetime;
       const sleeptime = gfxframetime - timesincelastframe;
