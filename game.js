@@ -7,19 +7,6 @@
 
 //FUNCTION DECLARATIONS --------------------------------------------------------------------------------------------------------------------------
 
-// Unpacks the RGBA data spat out by the hacked GameRender.update() and AmpColourMap.process() methods and repacks it as an ImageData object.
-function setRGB(startX, startY, width, height, rgbArray, offset, scansize) {
-  const dataArray = new Uint8ClampedArray(width * height * 4); // Create an array of unsigned 8 bit values, with 4 values (R, G, B, and A) for each pixel.
-  for(let i = 0; i < width * height; i++) { //Iterate over each value in the incoming array (1 for each pixel):
-    //For each pixel, unpack each of the 4 values from the 2nd dimension of input array and put in one large array.
-    dataArray[(i * 4) + 0] = rgbArray[i][0];
-    dataArray[(i * 4) + 1] = rgbArray[i][1];
-    dataArray[(i * 4) + 2] = rgbArray[i][2];
-    dataArray[(i * 4) + 3] = rgbArray[i][3];
-  }
-  return new ImageData(dataArray, width); // Create a new ImageData object using our unpacked array, and return it.
-}
-
 // Emulates the System.nanoTime() method from Java.
 function nanoTime() {
   return performance.now() * 1_000_000 // Converting milliseconds to nanoseconds.
@@ -35,9 +22,9 @@ async function graphicsLoop() {
     quantumframes_this_frame++;
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
       totalQFrames++;
-      console.time("qFrame " + totalQFrames);
+      //console.time("qFrame " + totalQFrames);
       manager.getQD().step();
-      console.timeEnd("qFrame " + totalQFrames);
+      //console.timeEnd("qFrame " + totalQFrames);
     } else {
       const timesincelastframe = nanoTime() - lastframetime;
       const sleeptime = gfxframetime - timesincelastframe;
@@ -50,9 +37,9 @@ async function graphicsLoop() {
       quantumframes_this_frame = 0;
       lastframetime = currenttime;
       totalGfxFrames++;
-      //console.time("gfxFrame " + totalGfxFrames);
+      console.time("gfxFrame " + totalGfxFrames);
       manager.updateGraphics();
-      //console.timeEnd("gfxFrame " + totalGfxFrames);
+      console.timeEnd("gfxFrame " + totalGfxFrames);
       break; // New graphics frame needed, exit the loop and request new frame.
     }
   }
@@ -66,13 +53,6 @@ async function graphicsLoop() {
 // # prefix is used to denote private properties/methods in JavaScript
 // this. prefix required for all property references in JavaScript, even within same class.
 // Can't really figure out how to do final without const, which doesn't work for class properties? If there is some easy way to emulate this, let me know - but I don't think it is actually necessary or even desirable.
-
-// Partial port of class from QuantumData.java in original
-class Complex {
-  #real; #imag; // final float
-  constructor(r = 0, i = 0) {this.#real = r; this.#imag = i;} // Preserving default values of 0 from original.
-  mod2() {return this.#real*this.#real+this.#imag*this.#imag} //NOTE TO SELF: MOD2 STANDS FOR MODULUS SQUARED!!!
-}
 
 // Partial port of class from QuantumData.java in original
 class QuantumData {
@@ -108,10 +88,13 @@ class QuantumData {
     this.#setupKernels();
   }
   getReal() {
-    return this.#real.toArray();
+    return this.#real;
   }
   getImag() {
-    return this.#imag.toArray();
+    return this.#imag;
+  }
+  getGPU() {
+    return this.#gpu;
   }
   #setupKernels() {
     this.#stepComponent = this.#gpu.createKernel(function(w, h, delta_t, update, ref, walls, sink_mult, pot_cache, sign) {
@@ -306,22 +289,34 @@ class AmpColourMap {
   #lookup; // int[]
   #max = 0; // float
   #gain = 0; // float
-  constructor() {
+  #gpu;
+  #mod2;
+  #render;
+  constructor(width, height, gpu) {
     this.#lookup = new Int32Array(this.#maxindex + 1); //Int32Array closest to int[] in Java.
     for (let i=0;i<this.#maxindex+1;i++) {
       this.#lookup[i] = Math.trunc(255*Math.pow(i/this.#maxindex,this.#gamma)) //Math.trunc() closest to how casting to int works in Java.
     }
+    this.#setupGPU(width, height, gpu);
   }
-  process(c) {
-    const source = c.mod2();
-    if (source>this.#max) this.#max = source;
-    let index = Math.trunc(source*this.#gain);
-    if (index>this.#maxindex) index=this.#maxindex;
-    const alpha = this.#lookup[index];
-    const red = 255;
-    const green = 255;
-    const blue = 255;
-    return[red, green, blue, alpha]; // In original bit shifting is done here to pack all 4 values into one int. In the original this is a requirement due to how setRGB, but this version has no such constraints. So, I've just returned it as a length 4 array to make my life easier. If this proves to break later I will change it.
+  #setupGPU(width, height, gpu) {
+    this.#gpu = gpu;
+    this.#mod2 = this.#gpu.createKernel(function(real, imag) {
+      return real[this.thread.x]*real[this.thread.x]+imag[this.thread.x]*imag[this.thread.x];
+    }).setOutput([width * height]).setPipeline(true).setImmutable(true);
+
+    this.#render = this.#gpu.createKernel(function(width, height, source, gain, maxindex, lookup) {
+      const pos = this.thread.x + width*(height - this.thread.y);
+      const index = Math.min(Math.trunc(source[pos]*gain), maxindex);
+      const alpha = lookup[index] / 255;
+      this.color(alpha, alpha, alpha);
+    }).setOutput([width, height]).setGraphical(true);
+  }
+  process(width, height, real, imag) {
+    const source = this.#mod2(real, imag);
+    this.#max = Math.max(...source.toArray()); // Slow*er* but not too bad, I checked.
+    this.#render(width, height, source, this.#gain, this.#maxindex, this.#lookup); // MAKE THESE CONSTANTS
+    return this.#render.getPixels();
   }
   resetGain() {
     this.#gain = this.#maxindex / this.#max;
@@ -331,7 +326,6 @@ class AmpColourMap {
 
 // Partial port of class from QuantumData.java in original
 class GameRender {
-  data; //int[]
   qd; // QuantumData
   colourmap; // AmpColourMap (for now)
   #image; // ImageData
@@ -340,26 +334,13 @@ class GameRender {
   constructor(source) {
     this.qd = source;
     this.#image = new ImageData(new Uint8ClampedArray(this.width() * this.height() * 4), this.width()); //ImageData replaced BufferedImage
-    this.data = new Array(this.width()*this.height()); // To avoid bit-shifting back and forth data is a 2D array instead of a 1D array of RGBA values packed into a single int. May attempt bit shifting later to quadruple check this isn't causing issues.
-    this.colourmap = new AmpColourMap();
+    this.colourmap = new AmpColourMap(this.width(), this.height(), this.qd.getGPU());
   }
   update() {
     // "it may seem perverse to calculate 'data' only to copy it into 'image'"
     // "rather than just calculate image.  but i profiled and it's faster."
-    const realArray = this.qd.getReal();
-    const imagArray = this.qd.getImag();
-    for (let y = 0; y < this.qd.height; y++) {
-      for (let x = 0; x < this.qd.width; x++) {
-        const point = new Complex(realArray[x+this.width()*y], imagArray[x+this.width()*y]);
-        this.data[x + this.qd.width * y] = this.colourmap.process(point);
-        if(this.qd.getWall(x, y)) {
-          this.data[x + this.qd.width * y] = [100, 100, 100, 255]; // Shade walls in uniform grey. Functionality ok but feels very hacky maybe fix later.
-        }
-      }
-    }
-    
+    this.#image = new ImageData(this.colourmap.process(this.width(), this.height(), this.qd.getReal(), this.qd.getImag()), this.width());
     this.colourmap.resetGain();
-    this.#image = setRGB(0, 0, this.width(), this.height(), this.data, 0, this.width()); // In the original this is a method that updates the RGB values of 'image'. As imageData cannot be edited once created in JavaScript, this instead returns an ImageData object which replaces the existing one.
   }
   getImage() {
     return this.#image;
