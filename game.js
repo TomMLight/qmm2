@@ -7,11 +7,6 @@
 
 //FUNCTION DECLARATIONS --------------------------------------------------------------------------------------------------------------------------
 
-// Emulates the System.nanoTime() method from Java.
-function nanoTime() {
-  return performance.now() * 1_000_000 // Converting milliseconds to nanoseconds.
-}
-
 // Partial port of UpdateTask.run() from GameWindow.java in original, hacked to get requestAnimationFrame() to work. Async so sleep functionality works.
 async function graphicsLoop() {
   // In the original, there is a main loop that breaks when the goal is sounded, and calls a repaint when a certain amount of time has passed.
@@ -26,13 +21,13 @@ async function graphicsLoop() {
       manager.getQD().step();
       //console.timeEnd("qFrame " + totalQFrames);
     } else {
-      const timesincelastframe = nanoTime() - lastframetime;
+      const timesincelastframe = performance.now() - lastframetime;
       const sleeptime = gfxframetime - timesincelastframe;
       if(sleeptime > 0) {
-        await new Promise(r => setTimeout(r, sleeptime/1000000)); // Sleeps for a number of milliseconds equal to argument provided. This code was taken from Stack Overflow post made by user "Dan Dascalescu" on 18-07-2018, edited by "blackgreen♦" on 03-04-2024. Accessed 27-02-2025. https://stackoverflow.com/questions/951021/what-is-the-javascript-version-of-sleep
+        await new Promise(r => setTimeout(r, sleeptime)); // Sleeps for a number of milliseconds equal to argument provided. This code was taken from Stack Overflow post made by user "Dan Dascalescu" on 18-07-2018, edited by "blackgreen♦" on 03-04-2024. Accessed 27-02-2025. https://stackoverflow.com/questions/951021/what-is-the-javascript-version-of-sleep
       }
     }
-    const currenttime = nanoTime();
+    const currenttime = performance.now();
     if(currenttime - lastframetime > gfxframetime) { //"30fps"
       quantumframes_this_frame = 0;
       lastframetime = currenttime;
@@ -352,7 +347,7 @@ class LevelManger {
   qd; // QuantumData
   gr; // GameRender
   controlstate; // ControlState
-  #quantumframetimenanos; // long
+  #quantumframetimemillis; // long
   #scale; // float
   constructor() {
     this.controlstate = new ControlState();
@@ -363,7 +358,7 @@ class LevelManger {
     this.qd.setDeltaT(dt);
     this.qd.setMaxTilt(maxtilt);
     this.gr = new GameRender(this.qd);
-    this.#quantumframetimenanos = Math.trunc(thousanditertimesecs/1000*1000000000); //Math.trunc closest to casting to long.
+    this.#quantumframetimemillis = thousanditertimesecs;
   }
   addGaussian(x, y, sigma, px, py, a) {
     this.qd.addGaussian(Math.trunc(x/this.#scale), Math.trunc(y/this.#scale), sigma, Math.trunc(px/this.#scale), Math.trunc(py/this.#scale), a);
@@ -384,7 +379,7 @@ class LevelManger {
     this.qd.resetInitialState();
   }
   quantumFrameTimeNanos() {
-    return this.#quantumframetimenanos;
+    return this.#quantumframetimemillis;
   }
 }
 
@@ -587,9 +582,9 @@ function keyUpEvent(e) {
 }
 
 // Begin implementation of UpdateTask.run()
-const gfxframetime = 33000000; // "30 fps"
+const gfxframetime = 33; // "30 fps"
 const quantum_frames_per_gfx_frame = gfxframetime / manager.quantumFrameTimeNanos();
-let lastframetime = nanoTime();
+let lastframetime = performance.now();
 let quantumframes_this_frame = 0;
 let totalQFrames = 0;
 let totalGfxFrames = 0;
