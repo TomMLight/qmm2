@@ -65,6 +65,7 @@ class QuantumData {
   #stepComponent;
   #toTexture;
   #resetPotentialCacheKernel;
+  #loadWalls;
 
   constructor(width, height, ks) {
     this.#controlstate = ks;
@@ -74,8 +75,8 @@ class QuantumData {
     this.#imag = new Float32Array(width * height).fill(0);
     this.#init_real = new Float32Array(width * height).fill(0);
     this.#init_imag = new Float32Array(width * height).fill(0);
-    this.#walls = new Array(width, height).fill(false);
-    this.#sink = new Array(width, height).fill(false);
+    this.#walls = new Array(width * height).fill(false);
+    this.#sink = new Array(width * height).fill(false);
     this.sink_mult = new Float32Array(width * height).fill(0);
     this.#levelDesignPotential = new Float32Array(width * height).fill(0);
     this.#pot_cache = new Float32Array(width * height).fill(0);
@@ -107,6 +108,10 @@ class QuantumData {
     }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true);
 
     this.#toTexture = this.#gpu.createKernel(function(values){
+      return values[this.thread.x];
+    }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true);
+
+    this.#loadWalls = this.#gpu.createKernel(function(values){
       return values[this.thread.x];
     }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true);
 
@@ -184,7 +189,9 @@ class QuantumData {
     const x_pot_step = right_change/this.width;
     const y_pot_step = bottom_change/this.width;
 
+    const oldCache = this.#pot_cache;
     this.#pot_cache = this.#resetPotentialCacheKernel(this.width, this.height, newtopleft, x_pot_step, y_pot_step, this.#levelDesignPotential);
+    oldCache.delete();
   }
   #ensure_no_positive_potential() {
     let maxpot = Number.NEGATIVE_INFINITY;
@@ -218,12 +225,20 @@ class QuantumData {
       this.#add_walls(); // "must be done before saveInitialState"
       this.#saveInitialState();
       this.#ensure_no_positive_potential();
+      this.#walls = this.#loadWalls(this.#walls);
+      this.#real = this.#toTexture(this.#real);
+      this.#imag = this.#toTexture(this.#imag);
+      this.#pot_cache = this.#toTexture(this.#pot_cache);
     }
     this.#controlstate.step();
     this.#reset_potential_cache();
 
+    const oldReal = this.#real;
     this.#real = this.#stepComponent(this.width, this.height, this.#delta_t, this.#real, this.#imag, this.#walls, this.sink_mult, this.#pot_cache, 1);
+    oldReal.delete();
+    const oldImag = this.#imag;
     this.#imag = this.#stepComponent(this.width, this.height, this.#delta_t, this.#imag, this.#real, this.#walls, this.sink_mult, this.#pot_cache, -1);
+    oldImag.delete();
   }
   #setupSinkMult() {
 		// "flood fill sink_mult with 0 where not a sink; otherwise distance in pixels from non-sink"
@@ -265,13 +280,16 @@ class QuantumData {
       }      
     }
   }
+  setWalls(submask) {
+    this.#walls = submask;
+  }
   // VERY temp
   getCS() {
     return this.#controlstate;
   }
   // ALSO VERY temp
-  getWall(x, y) {
-    return this.#walls[x+this.width*y];
+  getWalls() {
+    return this.#walls;
   }
 }
 
@@ -300,17 +318,22 @@ class AmpColourMap {
       return real[this.thread.x]*real[this.thread.x]+imag[this.thread.x]*imag[this.thread.x];
     }).setOutput([width * height]).setPipeline(true).setImmutable(true);
 
-    this.#render = this.#gpu.createKernel(function(width, height, source, gain, maxindex, lookup) {
+    this.#render = this.#gpu.createKernel(function(width, height, source, gain, maxindex, lookup, walls) {
       const pos = this.thread.x + width*(height - this.thread.y);
-      const index = Math.min(Math.trunc(source[pos]*gain), maxindex);
-      const alpha = lookup[index] / 255;
-      this.color(alpha, alpha, alpha);
+      if(walls[pos] == 1) {
+        this.color(0.5, 0.5, 0.5);
+      } else {
+        const index = Math.min(Math.trunc(source[pos]*gain), maxindex);
+        const alpha = lookup[index] / 255;
+        this.color(alpha, alpha, alpha);
+      }
     }).setOutput([width, height]).setGraphical(true);
   }
-  process(width, height, real, imag) {
+  process(width, height, real, imag, walls) {
     const source = this.#mod2(real, imag);
     this.#max = Math.max(...source.toArray()); // Slow*er* but not too bad, I checked.
-    this.#render(width, height, source, this.#gain, this.#maxindex, this.#lookup); // MAKE THESE CONSTANTS
+    this.#render(width, height, source, this.#gain, this.#maxindex, this.#lookup, walls); // MAKE THESE CONSTANTS
+    source.delete();
     return this.#render.getPixels();
   }
   resetGain() {
@@ -334,7 +357,7 @@ class GameRender {
   update() {
     // "it may seem perverse to calculate 'data' only to copy it into 'image'"
     // "rather than just calculate image.  but i profiled and it's faster."
-    this.#image = new ImageData(this.colourmap.process(this.width(), this.height(), this.qd.getReal(), this.qd.getImag()), this.width());
+    this.#image = new ImageData(this.colourmap.process(this.width(), this.height(), this.qd.getReal(), this.qd.getImag(), this.qd.getWalls()), this.width());
     this.colourmap.resetGain();
   }
   getImage() {
@@ -347,6 +370,7 @@ class LevelManger {
   qd; // QuantumData
   gr; // GameRender
   controlstate; // ControlState
+  mask;
   #quantumframetimemillis; // long
   #scale; // float
   constructor() {
@@ -362,6 +386,32 @@ class LevelManger {
   }
   addGaussian(x, y, sigma, px, py, a) {
     this.qd.addGaussian(Math.trunc(x/this.#scale), Math.trunc(y/this.#scale), sigma, Math.trunc(px/this.#scale), Math.trunc(py/this.#scale), a);
+  }
+  setMask(level) {
+    //https://stackoverflow.com/questions/10754661/javascript-getting-imagedata-without-canvas 12/03
+    const tempCanvas = document.createElement('canvas');
+    const tempContext = canvas.getContext('2d');
+    const img = document.getElementById(level);
+    img.crossOrigin = "Anonymous";
+    tempCanvas.width = img.width;
+    tempCanvas.height = img.height;
+    tempContext.drawImage(img, 0, 0);
+    this.mask = tempContext.getImageData(0, 0, img.width, img.height);
+  }
+  setWalls(mask) {
+    this.qd.setWalls(this.#getSubMask(mask));
+  }
+  #getSubMask(colour) {
+    const submask = new Array(Math.trunc(this.mask.width/this.#scale) * Math.trunc(this.mask.height/this.#scale));
+    for(let x = 0; x < this.qd.width; x++) {
+      for(let y = 0; y < this.qd.height; y++) {
+        const pos = x + this.qd.width * y;
+        if(this.mask.data.subarray(pos * 4, pos * 4 + 3).equals(colour)) {
+          submask[pos] = true;
+        }
+      } 
+    }
+    return submask;
   }
   getQD() {
     return this.qd;
