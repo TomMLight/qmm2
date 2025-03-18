@@ -27,10 +27,9 @@ Edits made to original shown in comments below -->
 </head>
 <body>
 <canvas width="700" height="525" id="game"></canvas> <!-- Canvas resized -->
-<img src="dist/c-shape-bounce-mask.png" style="display: none" id="level1"/>
 <script src="dist/gpu-browser.min.js"></script> <!-- Grab minified version of GPU.js library -->
-<script src="game.js">
-</script> <!-- Script moved from HTML to seperate .js file -->
+<script src="game.js" type="module"></script> <!-- Script moved from HTML to seperate .js file -->
+<script src="levels.js" type="module"></script> <!-- Seperate level file added -->
 <noscript>Your browser does not support JavaScript!</noscript> <!-- Added -->
 </body>
 </html>

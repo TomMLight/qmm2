@@ -13,6 +13,7 @@ async function graphicsLoop() {
   // I have struggled greatly to directly port this to JavaScript due to requestAnimationFrame, which as far as I can tell is the only way to achieve runtime animation.
   // If this is not the case, I will fix this asap.
   // Instead, this loop just executes until it is time to draw a new gfx frame, when it exits and recursively calls requestAnimationFrame again. 
+  let nextLevel = false;
   while(true) {
     quantumframes_this_frame++;
     if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
@@ -32,13 +33,20 @@ async function graphicsLoop() {
       quantumframes_this_frame = 0;
       lastframetime = currenttime;
       totalGfxFrames++;
-      console.time("gfxFrame " + totalGfxFrames);
+      //console.time("gfxFrame " + totalGfxFrames);
       manager.updateGraphics();
-      console.timeEnd("gfxFrame " + totalGfxFrames);
+      //console.timeEnd("gfxFrame " + totalGfxFrames);
       break; // New graphics frame needed, exit the loop and request new frame.
     }
+    if(manager.shouldTerminate()) {
+      nextLevel = true;
+      console.log("WINNAR!")
+      break
+    }
   }
-  requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
+  if(!nextLevel) {
+    requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
+  }
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -55,6 +63,7 @@ class QuantumData {
   sink_mult;
   #real; #imag; #init_real; #init_imag;
   #walls; #sink;
+  #counters;
   #delta_t; #maxtilt; // float
   running = false; // boolean
 
@@ -80,6 +89,7 @@ class QuantumData {
     this.sink_mult = new Float32Array(width * height).fill(0);
     this.#levelDesignPotential = new Float32Array(width * height).fill(0);
     this.#pot_cache = new Float32Array(width * height).fill(0);
+    this.#counters = [];
     this.#gpu = new GPU.GPU();
     this.#setupKernels();
   }
@@ -283,6 +293,34 @@ class QuantumData {
   setWalls(submask) {
     this.#walls = submask;
   }
+  addCounter(submask) {
+    this.#counters.push(submask);
+  }
+  getCounterScores(counters2) {
+    if(this.#counters.length != counters2.length) {
+      console.log("Error in getCounterScores(): this.#counters.length != counters2.length")
+    }
+    const tempReal = this.#real.toArray();
+    const tempImag = this.#real.toArray();
+
+    //"find total probability for renormalization"
+    let totalprob = 0;
+    for (let i = 0; i < this.width * this.height; i++) {
+      totalprob += tempReal[i] * tempReal[i] + tempImag[i] * tempImag[i];
+    }
+
+    for (let counterid = 0; counterid < this.#counters.length; counterid++) {
+      let score = 0;
+      const currentcounter = this.#counters[counterid];
+      for (let i = 0; i < this.width * this.height; i++) {
+        if(currentcounter[i]) {
+          score += tempReal[i] * tempReal[i] + tempImag[i] * tempImag[i];
+        }
+      }
+      counters2[counterid].setValue(Math.floor(score/totalprob * 100));
+    }
+
+  }
   // VERY temp
   getCS() {
     return this.#controlstate;
@@ -291,7 +329,26 @@ class QuantumData {
   getWalls() {
     return this.#walls;
   }
+  // Temp func used to pass goal to renderer
+  getGoal() {
+    return this.#counters[0];
+  }
 }
+
+class PosGoalCounter {
+  target;
+  value = 0;
+  constructor(lm, target) {
+    this.target = target;
+    this.lm = lm;
+  }
+  setValue(v) {this.value = v;}
+  check() {
+    if(this.value < this.target) this.lm.reportUnsatisfiedGoal();
+  }
+  reset() {this.value = 0;}
+}
+
 
 // Partial port of class from QuantumData.java in original
 // Apparently interfaces aren't really used in JavaScript and are sort of against the spirit of the language?
@@ -318,23 +375,20 @@ class AmpColourMap {
       return real[this.thread.x]*real[this.thread.x]+imag[this.thread.x]*imag[this.thread.x];
     }).setOutput([width * height]).setPipeline(true).setImmutable(true);
 
-    this.#render = this.#gpu.createKernel(function(width, height, source, gain, maxindex, lookup, walls) {
-      const pos = this.thread.x + width*(height - this.thread.y);
-      if(walls[pos] == 1) {
-        this.color(0.5, 0.5, 0.5);
-      } else {
-        const index = Math.min(Math.trunc(source[pos]*gain), maxindex);
-        const alpha = lookup[index] / 255;
-        this.color(alpha, alpha, alpha);
+    this.#render = this.#gpu.createKernel(function(source, gain, maxindex, lookup) {
+      if(this.thread.x % 4 != 3) {
+        return 255;
       }
-    }).setOutput([width, height]).setGraphical(true);
+      const index = Math.min(Math.trunc(source[this.thread.x / 4]*gain), maxindex);
+      return lookup[index];
+    }).setOutput([width * height * 4]);
   }
-  process(width, height, real, imag, walls) {
+  process(real, imag) {
     const source = this.#mod2(real, imag);
     this.#max = Math.max(...source.toArray()); // Slow*er* but not too bad, I checked.
-    this.#render(width, height, source, this.#gain, this.#maxindex, this.#lookup, walls); // MAKE THESE CONSTANTS
+    const result = this.#render(source, this.#gain, this.#maxindex, this.#lookup); // MAKE THESE CONSTANTS
     source.delete();
-    return this.#render.getPixels();
+    return new Uint8ClampedArray(result);
   }
   resetGain() {
     this.#gain = this.#maxindex / this.#max;
@@ -357,7 +411,7 @@ class GameRender {
   update() {
     // "it may seem perverse to calculate 'data' only to copy it into 'image'"
     // "rather than just calculate image.  but i profiled and it's faster."
-    this.#image = new ImageData(this.colourmap.process(this.width(), this.height(), this.qd.getReal(), this.qd.getImag(), this.qd.getWalls()), this.width());
+    this.#image = new ImageData(this.colourmap.process(this.qd.getReal(), this.qd.getImag()), this.width());
     this.colourmap.resetGain();
   }
   getImage() {
@@ -370,7 +424,9 @@ class LevelManger {
   qd; // QuantumData
   gr; // GameRender
   controlstate; // ControlState
-  mask;
+  mask; background = new Image();
+  counters = [];
+  #allGoalsSatisfiedThisRound; #allGoalsSatisfiedThreadSafe = false;
   #quantumframetimemillis; // long
   #scale; // float
   constructor() {
@@ -387,27 +443,24 @@ class LevelManger {
   addGaussian(x, y, sigma, px, py, a) {
     this.qd.addGaussian(Math.trunc(x/this.#scale), Math.trunc(y/this.#scale), sigma, Math.trunc(px/this.#scale), Math.trunc(py/this.#scale), a);
   }
-  setMask(level) {
-    //https://stackoverflow.com/questions/10754661/javascript-getting-imagedata-without-canvas 12/03
-    const tempCanvas = document.createElement('canvas');
-    const tempContext = canvas.getContext('2d');
-    const img = document.getElementById(level);
-    img.crossOrigin = "Anonymous";
-    tempCanvas.width = img.width;
-    tempCanvas.height = img.height;
-    tempContext.drawImage(img, 0, 0);
-    this.mask = tempContext.getImageData(0, 0, img.width, img.height);
+  setBackground(background) {
+    this.background = background;
   }
-  setWalls(mask) {
-    this.qd.setWalls(this.#getSubMask(mask));
+  setWalls(r, g, b) {
+    this.qd.setWalls(this.#getSubMask(r, g, b));
   }
-  #getSubMask(colour) {
-    const submask = new Array(Math.trunc(this.mask.width/this.#scale) * Math.trunc(this.mask.height/this.#scale));
+  #getSubMask(targetRed, targetGreen, targetBlue) {
+    const submask = new Array(Math.trunc(this.mask.width/this.#scale) * Math.trunc(this.mask.height/this.#scale)).fill(false);
     for(let x = 0; x < this.qd.width; x++) {
       for(let y = 0; y < this.qd.height; y++) {
-        const pos = x + this.qd.width * y;
-        if(this.mask.data.subarray(pos * 4, pos * 4 + 3).equals(colour)) {
-          submask[pos] = true;
+        const imgX = Math.trunc(x * this.#scale);
+        const imgY = Math.trunc(y * this.#scale);
+        const imgPos = (imgX + this.mask.width * imgY);
+        const thisRed = this.mask.data[imgPos*4 + 0];
+        const thisGreen = this.mask.data[imgPos*4 + 1];
+        const thisBlue = this.mask.data[imgPos*4 + 2];
+        if(thisRed == targetRed && thisGreen == targetGreen && thisBlue == targetBlue) {
+          submask[x + this.qd.width * y] = true;
         }
       } 
     }
@@ -421,12 +474,37 @@ class LevelManger {
       this.resetInitialState();
     }
     this.gr.update();
+    this.#checkCounters();
     // Following two lines replace lc.repaint in the original: clear canvas and then draw data in gr.#image to it.
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(this.background, 0, 0, canvas.width, canvas.height);
     createImageBitmap(this.gr.getImage()).then(renderer => ctx.drawImage(renderer, 0, 0, canvas.width, canvas.height)); // Creates new bitmap image using imageData and then scales it. This code was taken from Stack Overflow post made by user "Kaiido" on 18-07-2018. Accessed 27-02-2025. https://stackoverflow.com/questions/51387989/change-image-size-with-ctx-putimagedata
+  }
+  #checkCounters() {
+    this.qd.getCounterScores(this.counters);
+    this.#allGoalsSatisfiedThisRound = true;
+    for(let i = 0; i < this.counters.length; i++) {
+      this.counters[i].check();
+    }
+    this.#allGoalsSatisfiedThreadSafe = this.#allGoalsSatisfiedThisRound;
+  }
+  shouldTerminate() {
+    return this.#allGoalsSatisfiedThreadSafe;
   }
   resetInitialState() {
     this.qd.resetInitialState();
+    for(let i = 0; i < this.counters.length; i++) {
+      this.counters[i].reset();
+    }
+  }
+  addGoal(target) {
+    const submask = this.#getSubMask(255, 0, 0);
+    this.qd.addCounter(submask);
+    const gc = new PosGoalCounter(this, target);
+    this.counters.push(gc);
+  }
+  reportUnsatisfiedGoal() {
+    this.#allGoalsSatisfiedThisRound = false;
   }
   quantumFrameTimeNanos() {
     return this.#quantumframetimemillis;
@@ -616,8 +694,18 @@ const ctx = canvas.getContext("2d"); // Create 2D context.
 // Setting up objects.
 const manager = new LevelManger(); // Create new LevelManager (top level object at the moment)
 
-manager.init(2.5, 0.1, 10, 5/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. scale = 2.5, dt = 0.1, maxtilt = 10, thousanditertimesecs = 5/1.5 - all values taken from toofast.xml
-manager.addGaussian(153, 263, 10, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values again taken from toofast.xml.
+manager.init(3, 0.1, 2.5, 1.6/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. scale = 2.5, dt = 0.1, maxtilt = 10, thousanditertimesecs = 5/1.5 - all values taken from toofast.xml
+import {level_1} from "./levels.js"
+manager.mask = new ImageData(level_1, 700);
+manager.addGaussian(200, 109, 10, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values again taken from toofast.xml.
+manager.setWalls(0, 0, 0);
+manager.addGoal(20);
+
+const bg = new Image();
+bg.src = "https://raw.githubusercontent.com/fiftysevendegreesofrad/quantum/refs/heads/master/docs/levels/c-bounce-bg.jpg";
+bg.addEventListener("load", (e) => {
+  manager.setBackground(bg);
+});
 
 // Adding and binding key listeners.
 document.addEventListener('keydown', keyDownEvent);
