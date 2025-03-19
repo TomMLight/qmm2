@@ -40,11 +40,12 @@ async function graphicsLoop() {
     }
     if(manager.shouldTerminate()) {
       nextLevel = true;
-      console.log("WINNAR!")
       break
     }
   }
-  if(!nextLevel) {
+  if(nextLevel) {
+    getNextLevel();
+  } else {
     requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
   }
 }
@@ -338,11 +339,15 @@ class QuantumData {
 class PosGoalCounter {
   target;
   value = 0;
-  constructor(lm, target) {
+  textLocation;
+  constructor(lm, target, textLocation) {
     this.target = target;
+    this.textLocation = textLocation;
     this.lm = lm;
   }
   setValue(v) {this.value = v;}
+  getTextLocation() {return this.textLocation;}
+  getText() {return "GOAL+\n" + this.value + "/" + this.target + "%"}
   check() {
     if(this.value < this.target) this.lm.reportUnsatisfiedGoal();
   }
@@ -479,6 +484,10 @@ class LevelManger {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     ctx.drawImage(this.background, 0, 0, canvas.width, canvas.height);
     createImageBitmap(this.gr.getImage()).then(renderer => ctx.drawImage(renderer, 0, 0, canvas.width, canvas.height)); // Creates new bitmap image using imageData and then scales it. This code was taken from Stack Overflow post made by user "Kaiido" on 18-07-2018. Accessed 27-02-2025. https://stackoverflow.com/questions/51387989/change-image-size-with-ctx-putimagedata
+    for(let i = 0; i < this.counters.length; i++) {
+      const pos = this.counters[i].getTextLocation();
+      ctx.fillText(this.counters[i].getText(), pos[0], pos[1])
+    }
   }
   #checkCounters() {
     this.qd.getCounterScores(this.counters);
@@ -500,7 +509,7 @@ class LevelManger {
   addGoal(target) {
     const submask = this.#getSubMask(255, 0, 0);
     this.qd.addCounter(submask);
-    const gc = new PosGoalCounter(this, target);
+    const gc = new PosGoalCounter(this, target, [100, 400]);
     this.counters.push(gc);
   }
   reportUnsatisfiedGoal() {
@@ -690,26 +699,10 @@ class ControlState {
 // Retrieving data from HTML.
 const canvas = document.getElementById("game"); // Grab canvas from HTML
 const ctx = canvas.getContext("2d"); // Create 2D context.
+ctx.font = "18px Arial";
+ctx.fillStyle = "#ffffff"
 
-// Setting up objects.
-const manager = new LevelManger(); // Create new LevelManager (top level object at the moment)
-
-manager.init(3, 0.1, 2.5, 1.6/1.5); // manager.init() will have been called elsewhere by the time UpdateTask.run() is executed, so do it now. scale = 2.5, dt = 0.1, maxtilt = 10, thousanditertimesecs = 5/1.5 - all values taken from toofast.xml
-import {level_1} from "./levels.js"
-manager.mask = new ImageData(level_1, 700);
-manager.addGaussian(200, 109, 10, 0, 0, 1); // Also no point running a simulation if nothing to simulate, so add a gaussian. Values again taken from toofast.xml.
-manager.setWalls(0, 0, 0);
-manager.addGoal(20);
-
-const bg = new Image();
-bg.src = "https://raw.githubusercontent.com/fiftysevendegreesofrad/quantum/refs/heads/master/docs/levels/c-bounce-bg.jpg";
-bg.addEventListener("load", (e) => {
-  manager.setBackground(bg);
-});
-
-// Adding and binding key listeners.
-document.addEventListener('keydown', keyDownEvent);
-document.addEventListener('keyup', keyUpEvent);
+let manager = 0;
 
 function keyDownEvent(e) {
   manager.getQD().getCS().set(e.code, true);
@@ -719,12 +712,50 @@ function keyUpEvent(e) {
   manager.getQD().getCS().set(e.code, false);
 }
 
+document.addEventListener('keydown', keyDownEvent);
+document.addEventListener('keyup', keyUpEvent);
+
 // Begin implementation of UpdateTask.run()
 const gfxframetime = 33; // "30 fps"
-const quantum_frames_per_gfx_frame = gfxframetime / manager.quantumFrameTimeNanos();
-let lastframetime = performance.now();
+let quantum_frames_per_gfx_frame = 0;
+let lastframetime = 0;
 let quantumframes_this_frame = 0;
 let totalQFrames = 0;
 let totalGfxFrames = 0;
 
-requestAnimationFrame(graphicsLoop); // Start recursive calling of requestAnimationFrame, using graphicsLoop() as the function.
+const levelNames = ["c-bounce", "c-shape", "easysnake", "smorgasbord", "toofast"]
+
+getNextLevel();
+
+function getNextLevel() {
+  manager = new LevelManger();
+  //https://www.geeksforgeeks.org/how-to-load-xml-from-javascript/ 19/03
+  fetch("./levels/" + levelNames.shift() + ".xml")
+    .then((response) => response.text())
+    .then((xmlString) => {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+        const img = document.createElement('img');
+        img.crossOrigin = "Anonymous";
+        img.src = "./levels/"+ xmlDoc.getElementsByTagName("mask")[0].childNodes[0].nodeValue;
+        img.decode().then(() => {
+          ctx.drawImage(img, 0, 0);
+          manager.mask = ctx.getImageData(0, 0, img.width, img.height);
+          const root = xmlDoc.documentElement;
+          manager.init(root.getAttribute("scale"), Number(root.getAttribute("dt")), root.getAttribute("maxtilt"), root.getAttribute("qft")/1.5);
+          const gauss = xmlDoc.getElementsByTagName("gaussian")[0]
+          manager.addGaussian(gauss.getAttribute("x"), gauss.getAttribute("y"), gauss.getAttribute("sigma"), gauss.getAttribute("px"), gauss.getAttribute("py"), gauss.getAttribute("a"));
+          manager.setWalls(0, 0, 0);
+          manager.addGoal(20);
+          let bg = new Image();
+          bg.src = "./levels/" + xmlDoc.getElementsByTagName("background")[0].childNodes[0].nodeValue;
+          manager.setBackground(bg);
+          quantum_frames_per_gfx_frame = gfxframetime / manager.quantumFrameTimeNanos();
+          lastframetime = performance.now();
+          quantumframes_this_frame = 0;
+          totalQFrames = 0;
+          totalGfxFrames = 0;
+          requestAnimationFrame(graphicsLoop);
+        })
+    });  
+}
