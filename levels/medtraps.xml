@@ -9,6 +9,6 @@
 <trap mask="#0000ff" target="20"/>
 <trap mask="#ff00ff" target="20"/>
 <trap mask="#00ffff" target="20"/>
-<goal mask="#888888" target="50"/>
+<goal mask="#808080" target="50"/>
 <sink mask="#ffffff"/>
 </level>

@@ -11,8 +11,7 @@
 async function graphicsLoop() {
   // In the original, there is a main loop that breaks when the goal is sounded, and calls a repaint when a certain amount of time has passed.
   // I have struggled greatly to directly port this to JavaScript due to requestAnimationFrame, which as far as I can tell is the only way to achieve runtime animation.
-  // If this is not the case, I will fix this asap.
-  // Instead, this loop just executes until it is time to draw a new gfx frame, when it exits and recursively calls requestAnimationFrame again. 
+  // Instead, this loop just executes until it is time to draw a new gfx frame, when it exits and recursively calls requestAnimationFrame again (or grabs the next level if applica). 
   let nextLevel = false;
   while(true) {
     quantumframes_this_frame++;
@@ -48,6 +47,10 @@ async function graphicsLoop() {
   } else {
     requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
   }
+}
+
+function parseHexCode(code) {
+  return [Number("0x" + code.slice(1, 3)), Number("0x" + code.slice(3, 5)), Number("0x" + code.slice(5, 7))]
 }
 //------------------------------------------------------------------------------------------------------------------------------------------------
 
@@ -147,6 +150,14 @@ class QuantumData {
   resetInitialState() {
     this.#real = this.#toTexture(this.#init_real);
     this.#imag = this.#toTexture(this.#init_imag);
+  }
+  texturize() {
+    this.#real = this.#toTexture(this.#real);
+    this.#imag = this.#toTexture(this.#imag);
+  }
+  clearWaveFunction() {
+    this.#real = new Float32Array(this.width * this.height).fill(0);
+    this.#imag = new Float32Array(this.width * this.height).fill(0);
   }
   setDeltaT(dt) {this.#delta_t = dt;}
   setMaxTilt(mt) {this.#maxtilt = mt;}
@@ -291,6 +302,9 @@ class QuantumData {
       }      
     }
   }
+  addPotential(x, y, p) {
+    this.#levelDesignPotential[x + this.width * y] = p + this.#levelDesignPotential[x + this.width * y];
+  }
   setWalls(submask) {
     this.#walls = submask;
   }
@@ -318,7 +332,7 @@ class QuantumData {
           score += tempReal[i] * tempReal[i] + tempImag[i] * tempImag[i];
         }
       }
-      counters2[counterid].setValue(Math.floor(score/totalprob * 100));
+      counters2[counterid].setValue(Math.floor(score/totalprob * 100) || 0); // converts "falsy" values apparently, avoids divide by 0 after collapse
     }
 
   }
@@ -326,20 +340,13 @@ class QuantumData {
   getCS() {
     return this.#controlstate;
   }
-  // ALSO VERY temp
-  getWalls() {
-    return this.#walls;
-  }
-  // Temp func used to pass goal to renderer
-  getGoal() {
-    return this.#counters[0];
-  }
 }
 
 class PosGoalCounter {
   target;
   value = 0;
   textLocation;
+  lm;
   constructor(lm, target, textLocation) {
     this.target = target;
     this.textLocation = textLocation;
@@ -347,6 +354,7 @@ class PosGoalCounter {
   }
   setValue(v) {this.value = v;}
   getTextLocation() {return this.textLocation;}
+  getColour() {return "#ffffff";}
   getText() {return "GOAL+\n" + this.value + "/" + this.target + "%"}
   check() {
     if(this.value < this.target) this.lm.reportUnsatisfiedGoal();
@@ -354,6 +362,38 @@ class PosGoalCounter {
   reset() {this.value = 0;}
 }
 
+class CollapseCounter {
+  target;
+  value = 0;
+  textLocation;
+  lm;
+  sigma;
+  active = true;
+  constructor(lm, target, textLocation, sigma) {
+    this.target = target;
+    this.textLocation = textLocation;
+    this.sigma = sigma;
+    this.lm = lm;
+  }
+  setValue(v) {this.value = v;}
+  getTextLocation() {return this.textLocation;}
+  getColour() {return "#ffff00"}
+  getText() {
+    if(this.active) {
+      return "COLLAPSE+\n" + this.value + "/" + this.target + "%";
+    } else {
+      return "";
+    }
+  }
+  check() {
+    if(this.active && this.value >= this.target) {
+      this.lm.clearWaveFunction();
+      this.lm.addGaussianQUnits(this.textLocation[0], this.textLocation[1], this.sigma, 0, 0, 1);
+      this.active = false;
+    }
+  }
+  reset() {this.value = 0;}
+}
 
 // Partial port of class from QuantumData.java in original
 // Apparently interfaces aren't really used in JavaScript and are sort of against the spirit of the language?
@@ -434,8 +474,9 @@ class LevelManger {
   #allGoalsSatisfiedThisRound; #allGoalsSatisfiedThreadSafe = false;
   #quantumframetimemillis; // long
   #scale; // float
-  constructor() {
+  constructor(basename, filename) {
     this.controlstate = new ControlState();
+    loadLevel(basename, filename, this);
   }
   init(scale, dt, maxtilt, thousanditertimesecs) {
     this.#scale = scale;
@@ -448,13 +489,53 @@ class LevelManger {
   addGaussian(x, y, sigma, px, py, a) {
     this.qd.addGaussian(Math.trunc(x/this.#scale), Math.trunc(y/this.#scale), sigma, Math.trunc(px/this.#scale), Math.trunc(py/this.#scale), a);
   }
+  addGaussianQUnits(x, y, sigma, px, py, a) {
+    this.qd.addGaussian(x, y, sigma, px, py, a);
+    this.qd.texturize();
+  }
   setBackground(background) {
     this.background = background;
   }
-  setWalls(r, g, b) {
-    this.qd.setWalls(this.#getSubMask(r, g, b));
+  addPotentialPlane(tl, tr, bl, br, mask) {
+    const m = this.#getSubMask(mask);
+    // "find extremes"
+    let top = this.qd.height; let left = this.qd.width; let bottom = 0; let right = 0;
+    for(let x = 0; x < this.qd.width; x++) {
+      for(let y = 0; y < this.qd.height; y++) {
+        if(m[x + y * this.qd.width]) {
+          if(x < left) {left = x;}
+          if(x > right) {right = x;}
+          if(y < top) {top = y;}
+          if(y > bottom) {bottom = y;}
+        }
+      }
+    }
+    // "add potential"
+    let potwidth = right-left;
+    if(potwidth == 0) {potwidth = 1;}
+    let potheight = bottom-top;
+    if(potheight == 0) {potheight = 1;}
+    for(let x = left; x <= right; x++) {
+      for(let y = top; y <= bottom; y++) {
+        if(m[x + y * this.qd.width]) {
+          const rx = (x - left) / potwidth;
+          const ry = (y - top) / potheight;
+          // "potx0, potxh = potential at x,0 and x,height"
+          const potx0 = tl + (tr - tl) * rx;
+          const potxh = bl + (br - bl) * rx;
+          const p = potx0 + (potxh - potx0) * ry;
+          this.qd.addPotential(x, y, p);
+        }
+      }
+    }
   }
-  #getSubMask(targetRed, targetGreen, targetBlue) {
+  setWalls(mask) {
+    this.qd.setWalls(this.#getSubMask(mask));
+  }
+  #getSubMask(desired_colour) {
+    const wanted = parseHexCode(desired_colour);
+    let best_dist = Math.POSITIVE_INFINITY;
+    let chosen_colour = -1;
     const submask = new Array(Math.trunc(this.mask.width/this.#scale) * Math.trunc(this.mask.height/this.#scale)).fill(false);
     for(let x = 0; x < this.qd.width; x++) {
       for(let y = 0; y < this.qd.height; y++) {
@@ -464,12 +545,25 @@ class LevelManger {
         const thisRed = this.mask.data[imgPos*4 + 0];
         const thisGreen = this.mask.data[imgPos*4 + 1];
         const thisBlue = this.mask.data[imgPos*4 + 2];
-        if(thisRed == targetRed && thisGreen == targetGreen && thisBlue == targetBlue) {
+        if(thisRed == wanted[0] && thisGreen == wanted[1] && thisBlue == wanted[2]) {
           submask[x + this.qd.width * y] = true;
         }
       } 
     }
     return submask;
+  }
+  #getCOG(mask) {
+    let xtot = 0; let ytot = 0; let n = 0;
+    for(let x = 0; x < this.qd.width; x++) {
+      for(let y = 0; y < this.qd.height; y++) {
+        if(mask[x + this.qd.width * y]) {
+          xtot += x;
+          ytot += y;
+          n++;
+        }
+      }      
+    }
+    return [xtot/n, ytot/n];
   }
   getQD() {
     return this.qd;
@@ -485,8 +579,9 @@ class LevelManger {
     ctx.drawImage(this.background, 0, 0, canvas.width, canvas.height);
     createImageBitmap(this.gr.getImage()).then(renderer => ctx.drawImage(renderer, 0, 0, canvas.width, canvas.height)); // Creates new bitmap image using imageData and then scales it. This code was taken from Stack Overflow post made by user "Kaiido" on 18-07-2018. Accessed 27-02-2025. https://stackoverflow.com/questions/51387989/change-image-size-with-ctx-putimagedata
     for(let i = 0; i < this.counters.length; i++) {
+      ctx.fillStyle = this.counters[i].getColour();
       const pos = this.counters[i].getTextLocation();
-      ctx.fillText(this.counters[i].getText(), pos[0], pos[1])
+      ctx.fillText(this.counters[i].getText(), (pos[0] * this.#scale) - (ctx.measureText(this.counters[i].getText()).width / 2), pos[1] * this.#scale)
     }
   }
   #checkCounters() {
@@ -498,7 +593,7 @@ class LevelManger {
     this.#allGoalsSatisfiedThreadSafe = this.#allGoalsSatisfiedThisRound;
   }
   shouldTerminate() {
-    return this.#allGoalsSatisfiedThreadSafe;
+    return this.#allGoalsSatisfiedThreadSafe || this.controlstate.menuRequested();
   }
   resetInitialState() {
     this.qd.resetInitialState();
@@ -506,11 +601,20 @@ class LevelManger {
       this.counters[i].reset();
     }
   }
-  addGoal(target) {
-    const submask = this.#getSubMask(255, 0, 0);
+  addGoal(mask, target) {
+    const submask = this.#getSubMask(mask);
     this.qd.addCounter(submask);
-    const gc = new PosGoalCounter(this, target, [100, 400]);
+    const gc = new PosGoalCounter(this, target, this.#getCOG(submask));
     this.counters.push(gc);
+  }
+  addCollapse(mask, target, sigma) {
+    const submask = this.#getSubMask(mask);
+    this.qd.addCounter(submask);
+    const cc = new CollapseCounter(this, target, this.#getCOG(submask), sigma);
+    this.counters.push(cc);
+  }
+  clearWaveFunction() {
+    this.qd.clearWaveFunction();
   }
   reportUnsatisfiedGoal() {
     this.#allGoalsSatisfiedThisRound = false;
@@ -616,9 +720,18 @@ class ControlState {
       return false;
     }
   }
-  #up = false; #down = false; #left = false; #right = false; #reset = false;
+  menuRequested() {
+    // "called multiple times"
+		// "but once menu is requested during class lifespan"
+		// "it can't be cancelled, so no need to reset"
+		return this.#menu;
+  }
+  #up = false; #down = false; #left = false; #right = false; #reset = false; #menu = false;
   #queueReset() {
     this.#reset = true;
+  }
+  #queueMenu() {
+    this.#menu = true;
   }
   set(key, value) {
     switch(key) {
@@ -636,6 +749,12 @@ class ControlState {
         break;
       case "KeyR":
         this.#queueReset();
+        break;
+      case "KeyM":
+        // Hacky key-up stops multiple
+        if(!value) {
+          this.#queueMenu();
+        }
         break;
     }
   }
@@ -700,7 +819,6 @@ class ControlState {
 const canvas = document.getElementById("game"); // Grab canvas from HTML
 const ctx = canvas.getContext("2d"); // Create 2D context.
 ctx.font = "18px Arial";
-ctx.fillStyle = "#ffffff"
 
 let manager = 0;
 
@@ -723,39 +841,113 @@ let quantumframes_this_frame = 0;
 let totalQFrames = 0;
 let totalGfxFrames = 0;
 
-const levelNames = ["c-bounce", "c-shape", "easysnake", "smorgasbord", "toofast"]
-
+const levelNames = ["c-bounce", "c-shape", "easysnake", "smorgasbord", "toofast", "medtraps", "hardtraps_introcollapse", "caketray0", "diffract", "caketray1", "annularmake", "annularwait", "annularwaitmove", "hardshell", "caketray2", "tunneling3"]
 getNextLevel();
 
+function loadLevel(baseurl, levelfile, lm) {
+  try {
+    //https://www.geeksforgeeks.org/how-to-load-xml-from-javascript/ 19/03
+    fetch(baseurl + levelfile + ".xml")
+      .then((response) => response.text())
+      .then((xmlString) => {
+          const parser = new DOMParser();
+          const dom = parser.parseFromString(xmlString, "text/xml");
+          const root = dom.documentElement;
+          lm.init(root.getAttribute("scale"),
+              Number(root.getAttribute("dt")),
+              root.getAttribute("maxtilt"),
+              root.getAttribute("qft")/1.5);
+          
+          const nodes = root.childNodes;
+
+          // "get mask first" (done differently here bcuz async)
+          const img = document.createElement('img');
+          img.crossOrigin = "Anonymous";
+          img.src = baseurl + dom.getElementsByTagName("mask")[0].childNodes[0].nodeValue;
+          img.decode().then(() => {
+            ctx.drawImage(img, 0, 0);
+            lm.mask = ctx.getImageData(0, 0, img.width, img.height);
+
+            for(let i = 0; i < nodes.length; i++) {
+              const node = nodes[i];
+              //element?
+              switch(node.nodeName) {
+                case "synth":
+                  //dummy
+                  break;
+                case "audioloop":
+                  //dummy
+                  break;
+                case "background":
+                  let bg = new Image();
+                  bg.src = baseurl + node.childNodes[0].nodeValue;
+                  lm.setBackground(bg);
+                  break;
+                case "text":
+                  //dummy
+                  break;
+                case "potentialplane":
+                  lm.addPotentialPlane(node.getAttribute("tl"),
+                      node.getAttribute("tr"),
+                      node.getAttribute("bl"),
+                      node.getAttribute("br"),
+                      node.getAttribute("mask"));
+                  break;
+                case "potentialwell":
+                  //dummy
+                  break;
+                case "potentialcone":
+                  //dummy
+                  break;
+                case "gaussian":
+                  lm.addGaussian(node.getAttribute("x"),
+                      node.getAttribute("y"),
+                      node.getAttribute("sigma"),
+                      node.getAttribute("px"),
+                      node.getAttribute("py"),
+                      node.getAttribute("a"));
+                  break;
+                case "delta":
+                  //dummy
+                  break;
+                case "goal":
+                  lm.addGoal(node.getAttribute("mask"), node.getAttribute("target"));
+                  break;
+                case "reward":
+                  //dummy
+                  break;
+                case "walls":
+                  lm.setWalls(node.getAttribute("mask"));
+                  break;
+                case "sink":
+                  //dummy
+                  break;
+                case "collapse":
+                  lm.addCollapse(node.getAttribute("mask"), node.getAttribute("target"), node.getAttribute("sigma"));
+                  break;
+                case "trap":
+                  //dummy
+                  break;
+                case "steepeningvalley":
+                  //dummy
+                  break;
+              }
+            }
+          
+            // MOVE THIS ELSEWHERE?!
+            quantum_frames_per_gfx_frame = gfxframetime / lm.quantumFrameTimeNanos();
+            lastframetime = performance.now();
+            quantumframes_this_frame = 0;
+            totalQFrames = 0;
+            totalGfxFrames = 0;
+            requestAnimationFrame(graphicsLoop);
+          })
+      });
+  } catch(error) {
+    //dummy
+  }
+}
+
 function getNextLevel() {
-  manager = new LevelManger();
-  //https://www.geeksforgeeks.org/how-to-load-xml-from-javascript/ 19/03
-  fetch("./levels/" + levelNames.shift() + ".xml")
-    .then((response) => response.text())
-    .then((xmlString) => {
-        const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(xmlString, "text/xml");
-        const img = document.createElement('img');
-        img.crossOrigin = "Anonymous";
-        img.src = "./levels/"+ xmlDoc.getElementsByTagName("mask")[0].childNodes[0].nodeValue;
-        img.decode().then(() => {
-          ctx.drawImage(img, 0, 0);
-          manager.mask = ctx.getImageData(0, 0, img.width, img.height);
-          const root = xmlDoc.documentElement;
-          manager.init(root.getAttribute("scale"), Number(root.getAttribute("dt")), root.getAttribute("maxtilt"), root.getAttribute("qft")/1.5);
-          const gauss = xmlDoc.getElementsByTagName("gaussian")[0]
-          manager.addGaussian(gauss.getAttribute("x"), gauss.getAttribute("y"), gauss.getAttribute("sigma"), gauss.getAttribute("px"), gauss.getAttribute("py"), gauss.getAttribute("a"));
-          manager.setWalls(0, 0, 0);
-          manager.addGoal(20);
-          let bg = new Image();
-          bg.src = "./levels/" + xmlDoc.getElementsByTagName("background")[0].childNodes[0].nodeValue;
-          manager.setBackground(bg);
-          quantum_frames_per_gfx_frame = gfxframetime / manager.quantumFrameTimeNanos();
-          lastframetime = performance.now();
-          quantumframes_this_frame = 0;
-          totalQFrames = 0;
-          totalGfxFrames = 0;
-          requestAnimationFrame(graphicsLoop);
-        })
-    });  
+  manager = new LevelManger("./levels/", levelNames.shift());
 }
