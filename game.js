@@ -52,6 +52,114 @@ async function graphicsLoop() {
 function parseHexCode(code) {
   return [Number("0x" + code.slice(1, 3)), Number("0x" + code.slice(3, 5)), Number("0x" + code.slice(5, 7))]
 }
+
+function loadLevel(baseurl, levelfile, lm) {
+  try {
+    //https://www.geeksforgeeks.org/how-to-load-xml-from-javascript/ 19/03
+    fetch(baseurl + levelfile + ".xml")
+      .then((response) => response.text())
+      .then((xmlString) => {
+          const parser = new DOMParser();
+          const dom = parser.parseFromString(xmlString, "text/xml");
+          const root = dom.documentElement;
+          lm.init(root.getAttribute("scale"),
+              Number(root.getAttribute("dt")),
+              root.getAttribute("maxtilt"),
+              root.getAttribute("qft")/1.5);
+          
+          const nodes = root.childNodes;
+
+          // "get mask first" (done differently here bcuz async)
+          const img = document.createElement('img');
+          img.crossOrigin = "Anonymous";
+          img.src = baseurl + dom.getElementsByTagName("mask")[0].childNodes[0].nodeValue;
+          img.decode().then(() => {
+            ctx.drawImage(img, 0, 0);
+            lm.mask = ctx.getImageData(0, 0, img.width, img.height);
+
+            for(let i = 0; i < nodes.length; i++) {
+              const node = nodes[i];
+              //element?
+              switch(node.nodeName) {
+                case "synth":
+                  //dummy
+                  break;
+                case "audioloop":
+                  //dummy
+                  break;
+                case "background":
+                  let bg = new Image();
+                  bg.src = baseurl + node.childNodes[0].nodeValue;
+                  lm.setBackground(bg);
+                  break;
+                case "text":
+                  //dummy
+                  break;
+                case "potentialplane":
+                  lm.addPotentialPlane(node.getAttribute("tl"),
+                      node.getAttribute("tr"),
+                      node.getAttribute("bl"),
+                      node.getAttribute("br"),
+                      node.getAttribute("mask"));
+                  break;
+                case "potentialwell":
+                  //dummy
+                  break;
+                case "potentialcone":
+                  //dummy
+                  break;
+                case "gaussian":
+                  lm.addGaussian(node.getAttribute("x"),
+                      node.getAttribute("y"),
+                      node.getAttribute("sigma"),
+                      node.getAttribute("px"),
+                      node.getAttribute("py"),
+                      node.getAttribute("a"));
+                  break;
+                case "delta":
+                  //dummy
+                  break;
+                case "goal":
+                  lm.addGoal(node.getAttribute("mask"), node.getAttribute("target"));
+                  break;
+                case "reward":
+                  //dummy
+                  break;
+                case "walls":
+                  lm.setWalls(node.getAttribute("mask"));
+                  break;
+                case "sink":
+                  //dummy
+                  break;
+                case "collapse":
+                  lm.addCollapse(node.getAttribute("mask"), node.getAttribute("target"), node.getAttribute("sigma"));
+                  break;
+                case "trap":
+                  //dummy
+                  break;
+                case "steepeningvalley":
+                  //dummy
+                  break;
+              }
+            }
+          
+            // MOVE THIS ELSEWHERE?!
+            quantum_frames_per_gfx_frame = gfxframetime / lm.quantumFrameTimeNanos();
+            lastframetime = performance.now();
+            quantumframes_this_frame = 0;
+            totalQFrames = 0;
+            totalGfxFrames = 0;
+            requestAnimationFrame(graphicsLoop);
+          })
+      });
+  } catch(error) {
+    //dummy
+  }
+}
+
+function getNextLevel() {
+  manager = new LevelManger("./levels/", levelNames.shift());
+}
 //------------------------------------------------------------------------------------------------------------------------------------------------
 
 
@@ -117,7 +225,7 @@ class QuantumData {
           return 0;
       }
   
-      // Else, return updated value of component.
+      // Else, return the updated value of component using the same formula as QMM1 (with the addition of "sign" for kernel reuse).
       return sink_mult[x+w*y] * (update[x+w*y] + sign * delta_t * (-0.5 * (ref[x+w*(y-1)]+ref[x+w*(y+1)]+ref[(x-1)+w*y]+ref[(x+1)+w*y]-4*ref[x+w*y]) + pot_cache[x+w*y]*ref[x+w*y]));
     }).setOutput([this.width * this.height]).setPipeline(true).setImmutable(true);
 
@@ -335,10 +443,6 @@ class QuantumData {
       counters2[counterid].setValue(Math.floor(score/totalprob * 100) || 0); // converts "falsy" values apparently, avoids divide by 0 after collapse
     }
 
-  }
-  // VERY temp
-  getCS() {
-    return this.#controlstate;
   }
 }
 
@@ -823,11 +927,11 @@ ctx.font = "18px Arial";
 let manager = 0;
 
 function keyDownEvent(e) {
-  manager.getQD().getCS().set(e.code, true);
+  manager.controlstate.set(e.code, true);
 }
 
 function keyUpEvent(e) {
-  manager.getQD().getCS().set(e.code, false);
+  manager.controlstate.set(e.code, false);
 }
 
 document.addEventListener('keydown', keyDownEvent);
@@ -843,111 +947,3 @@ let totalGfxFrames = 0;
 
 const levelNames = ["c-bounce", "c-shape", "easysnake", "smorgasbord", "toofast", "medtraps", "hardtraps_introcollapse", "caketray0", "diffract", "caketray1", "annularmake", "annularwait", "annularwaitmove", "hardshell", "caketray2", "tunneling3"]
 getNextLevel();
-
-function loadLevel(baseurl, levelfile, lm) {
-  try {
-    //https://www.geeksforgeeks.org/how-to-load-xml-from-javascript/ 19/03
-    fetch(baseurl + levelfile + ".xml")
-      .then((response) => response.text())
-      .then((xmlString) => {
-          const parser = new DOMParser();
-          const dom = parser.parseFromString(xmlString, "text/xml");
-          const root = dom.documentElement;
-          lm.init(root.getAttribute("scale"),
-              Number(root.getAttribute("dt")),
-              root.getAttribute("maxtilt"),
-              root.getAttribute("qft")/1.5);
-          
-          const nodes = root.childNodes;
-
-          // "get mask first" (done differently here bcuz async)
-          const img = document.createElement('img');
-          img.crossOrigin = "Anonymous";
-          img.src = baseurl + dom.getElementsByTagName("mask")[0].childNodes[0].nodeValue;
-          img.decode().then(() => {
-            ctx.drawImage(img, 0, 0);
-            lm.mask = ctx.getImageData(0, 0, img.width, img.height);
-
-            for(let i = 0; i < nodes.length; i++) {
-              const node = nodes[i];
-              //element?
-              switch(node.nodeName) {
-                case "synth":
-                  //dummy
-                  break;
-                case "audioloop":
-                  //dummy
-                  break;
-                case "background":
-                  let bg = new Image();
-                  bg.src = baseurl + node.childNodes[0].nodeValue;
-                  lm.setBackground(bg);
-                  break;
-                case "text":
-                  //dummy
-                  break;
-                case "potentialplane":
-                  lm.addPotentialPlane(node.getAttribute("tl"),
-                      node.getAttribute("tr"),
-                      node.getAttribute("bl"),
-                      node.getAttribute("br"),
-                      node.getAttribute("mask"));
-                  break;
-                case "potentialwell":
-                  //dummy
-                  break;
-                case "potentialcone":
-                  //dummy
-                  break;
-                case "gaussian":
-                  lm.addGaussian(node.getAttribute("x"),
-                      node.getAttribute("y"),
-                      node.getAttribute("sigma"),
-                      node.getAttribute("px"),
-                      node.getAttribute("py"),
-                      node.getAttribute("a"));
-                  break;
-                case "delta":
-                  //dummy
-                  break;
-                case "goal":
-                  lm.addGoal(node.getAttribute("mask"), node.getAttribute("target"));
-                  break;
-                case "reward":
-                  //dummy
-                  break;
-                case "walls":
-                  lm.setWalls(node.getAttribute("mask"));
-                  break;
-                case "sink":
-                  //dummy
-                  break;
-                case "collapse":
-                  lm.addCollapse(node.getAttribute("mask"), node.getAttribute("target"), node.getAttribute("sigma"));
-                  break;
-                case "trap":
-                  //dummy
-                  break;
-                case "steepeningvalley":
-                  //dummy
-                  break;
-              }
-            }
-          
-            // MOVE THIS ELSEWHERE?!
-            quantum_frames_per_gfx_frame = gfxframetime / lm.quantumFrameTimeNanos();
-            lastframetime = performance.now();
-            quantumframes_this_frame = 0;
-            totalQFrames = 0;
-            totalGfxFrames = 0;
-            requestAnimationFrame(graphicsLoop);
-          })
-      });
-  } catch(error) {
-    //dummy
-  }
-}
-
-function getNextLevel() {
-  manager = new LevelManger("./levels/", levelNames.shift());
-}
