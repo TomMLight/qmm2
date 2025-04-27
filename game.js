@@ -7,55 +7,56 @@
 
 //FUNCTION DECLARATIONS --------------------------------------------------------------------------------------------------------------------------
 
-// Partial port of UpdateTask.run() from GameWindow.java in original, hacked to get requestAnimationFrame() to work. Async so sleep functionality works.
+// graphicsLoop - A partial port of the run() method of the UpdateTask runnable object in QMM1.
+// This function is exclusively called by the browser after earlier being passed as a parameter to a call of requestAnimationFrame().
+// After requestAnimationFrame() is called, when the browser next decides it is time to render a graphics frame (30 fps if tab is in focus),
+// it first calls the function that was passed to requestAnimationFrame().
+// In this case, the function contains a loop which renders quantum simulation frames until A) a target number of quantum frames are reached (30),
+// B) a time limit is reached (1/30th of a second), or C) the next level has been queued.
+// In the case of A and B a new graphics frame is rendered and then requestAnimationFrame() is called again, restarting the progress.
+// In C's case getNextLevel() is called, and after the next level is loaded requestAnimationFrame() is called with graphicsLoop() to restart the
+// simulation.
 async function graphicsLoop() {
-  // In the original, there is a main loop that breaks when the goal is sounded, and calls a repaint when a certain amount of time has passed.
-  // I have struggled greatly to directly port this to JavaScript due to requestAnimationFrame, which as far as I can tell is the only way to achieve runtime animation.
-  // Instead, this loop just executes until it is time to draw a new gfx frame, when it exits and recursively calls requestAnimationFrame again (or grabs the next level if applica). 
-  let nextLevel = false;
-  while(true) {
-    quantumframes_this_frame++;
-    if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {
-      totalQFrames++;
-      //console.time("qFrame " + totalQFrames);
-      manager.getQD().step();
-      //console.timeEnd("qFrame " + totalQFrames);
-    } else {
-      const timesincelastframe = performance.now() - lastframetime;
-      const sleeptime = gfxframetime - timesincelastframe;
-      if(sleeptime > 0) {
-        await new Promise(r => setTimeout(r, sleeptime)); // Sleeps for a number of milliseconds equal to argument provided. This code was taken from Stack Overflow post made by user "Dan Dascalescu" on 18-07-2018, edited by "blackgreen♦" on 03-04-2024. Accessed 27-02-2025. https://stackoverflow.com/questions/951021/what-is-the-javascript-version-of-sleep
+  let nextLevel = false;                                            // Need to know when loop ends if this is because a new frame has been rendered or we need to load the next level.
+  while(true) {                                                     // Until break called by frame time limit or level ending:
+    quantumframes_this_frame++;                                       // Increment the quantum frame count for this graphics frame stored in global scope (needed to get around requestAnimationFrame).
+    if(quantumframes_this_frame < quantum_frames_per_gfx_frame) {     // If we haven't hit our target number of qFrames yet:
+      totalQFrames++;                                                   // Increment the number of total qFrames for testing
+      //console.time("qFrame " + totalQFrames);                         // Start timing
+      manager.getQD().step();                                           // Advance the simulation one step.
+      //console.timeEnd("qFrame " + totalQFrames);                      // Finish timing and display.
+    } else {                                                          // Else if we have hit our target:
+      const timesincelastframe = performance.now() - lastframetime;     // Calculate how much time has passed since last graphics frame.
+      const sleeptime = gfxframetime - timesincelastframe;              // Calculate the amount of time until the end of the frame
+      if(sleeptime > 0) {                                               // If this time is greater than zero:
+        await new Promise(r => setTimeout(r, sleeptime));                 // Sleep for the requisite amount of time.
       }
     }
-    const currenttime = performance.now();
-    if(currenttime - lastframetime > gfxframetime) { //"30fps"
-      quantumframes_this_frame = 0;
-      lastframetime = currenttime;
-      totalGfxFrames++;
-      //console.time("gfxFrame " + totalGfxFrames);
-      manager.updateGraphics();
-      //console.timeEnd("gfxFrame " + totalGfxFrames);
-      break; // New graphics frame needed, exit the loop and request new frame.
+    const currenttime = performance.now();                            // Take a time reading
+    if(currenttime - lastframetime > gfxframetime) {                  // Calculate the amount of time since last frame. If it is greater than the target time:        
+      quantumframes_this_frame = 0;                                     // Reset the qFrame count to zero.
+      lastframetime = currenttime;                                      // Note the new time since last frame.
+      totalGfxFrames++;                                                 // Increment the graphics frame counter for testing.
+      //console.time("gfxFrame " + totalGfxFrames);                     // Start timing
+      manager.updateGraphics();                                         // Render and display a new graphics frame.
+      //console.timeEnd("gfxFrame " + totalGfxFrames);                  // Finish timing and display.
+      break;                                                            // Need to pass control back to browser to await next graphics frame, so break.
     }
-    if(manager.shouldTerminate()) {
-      nextLevel = true;
-      break
+    if(manager.shouldTerminate()) {                                   // If terminate level flag has been raised:
+      nextLevel = true;                                                 // Amend boolean flag so we remember to call getNextLevel()
+      break                                                             // Break so we can call it.
     }
   }
-  if(nextLevel) {
-    getNextLevel();
-  } else {
-    requestAnimationFrame(graphicsLoop); // Recursively call requestAnimationFrame to queue next frame.
+  if(nextLevel) {                                                   // If we broke loop to load new level:
+    getNextLevel();                                                   // Do so
+  } else {                                                          // Otherwise:
+    requestAnimationFrame(graphicsLoop);                              // Schedule the next animation frame and pass control back to browser.
   }
 }
 
-function parseHexCode(code) {
-  return [Number("0x" + code.slice(1, 3)), Number("0x" + code.slice(3, 5)), Number("0x" + code.slice(5, 7))]
-}
-
+// loadLevel - 
 function loadLevel(baseurl, levelfile, lm) {
   try {
-    //https://www.geeksforgeeks.org/how-to-load-xml-from-javascript/ 19/03
     fetch(baseurl + levelfile + ".xml")
       .then((response) => response.text())
       .then((xmlString) => {
@@ -637,7 +638,7 @@ class LevelManger {
     this.qd.setWalls(this.#getSubMask(mask));
   }
   #getSubMask(desired_colour) {
-    const wanted = parseHexCode(desired_colour);
+    const wanted = [Number("0x" + desired_colour.slice(1, 3)), Number("0x" + desired_colour.slice(3, 5)), Number("0x" + desired_colour.slice(5, 7))];
     let best_dist = Math.POSITIVE_INFINITY;
     let chosen_colour = -1;
     const submask = new Array(Math.trunc(this.mask.width/this.#scale) * Math.trunc(this.mask.height/this.#scale)).fill(false);
