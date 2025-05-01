@@ -923,11 +923,6 @@ const canvas = document.getElementById("game"); // Grab canvas from HTML
 const ctx = canvas.getContext("2d"); // Create 2D context.
 ctx.font = "18px Arial";
 
-//Firefox unsupported
-if (navigator.userAgent.indexOf("Firefox") != -1) {
-  ctx.fillText("Unfortunately, Firefox is not supported by this application. Please switch to a different browser.")
-}
-
 let manager = 0;
 
 function keyDownEvent(e) {
