@@ -54,7 +54,6 @@ async function graphicsLoop() {
   }
 }
 
-// loadLevel - 
 function loadLevel(baseurl, levelfile, lm) {
   try {
     fetch(baseurl + levelfile + ".xml")
@@ -70,7 +69,7 @@ function loadLevel(baseurl, levelfile, lm) {
           
           const nodes = root.childNodes;
 
-          // "get mask first" (done differently here bcuz async)
+          // "get mask first" (done differently here because async)
           const img = document.createElement('img');
           img.crossOrigin = "Anonymous";
           img.src = baseurl + dom.getElementsByTagName("mask")[0].childNodes[0].nodeValue;
@@ -144,7 +143,6 @@ function loadLevel(baseurl, levelfile, lm) {
               }
             }
           
-            // MOVE THIS ELSEWHERE?!
             quantum_frames_per_gfx_frame = gfxframetime / lm.quantumFrameTimeNanos();
             lastframetime = performance.now();
             quantumframes_this_frame = 0;
@@ -924,6 +922,11 @@ class ControlState {
 const canvas = document.getElementById("game"); // Grab canvas from HTML
 const ctx = canvas.getContext("2d"); // Create 2D context.
 ctx.font = "18px Arial";
+
+//Firefox unsupported
+if (navigator.userAgent.indexOf("Firefox") != -1) {
+  ctx.fillText("Unfortunately, Firefox is not supported by this application. Please switch to a different browser.")
+}
 
 let manager = 0;
 
